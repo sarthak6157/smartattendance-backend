@@ -107,34 +107,83 @@ def list_slots(
         effective_section    = section
         effective_subsection = None
 
-    # Branch match — flexible so format differences don't break it.
-    # Student branch: "CSE (AI-ML-DL)"
-    # Slot branch might be: "CSE (AI-ML-DL)", "B.Tech - CSE (AI-ML-DL)", "CSE", "B.Tech CSE" etc.
-    # Strategy:
-    #   1. Exact match (case-insensitive)
-    #   2. Slot branch CONTAINS student branch (e.g. slot="B.Tech - CSE (AI-ML-DL)" ⊇ stu="CSE (AI-ML-DL)")
-    #   3. Student branch CONTAINS slot branch (e.g. slot="CSE" ⊆ stu="CSE (AI-ML-DL)")
-    #   4. NULL slot branch = applies to everyone
+    # ── Permanent Branch Matching Fix ─────────────────────────────────────────
+    # Problem: slot branch = "B.Tech CSE (AI-ML-DL)" but user branch = "CSE (AI-ML-DL)"
+    # Solution: extract CORE keywords from both and match on those
+    # Core = remove common prefixes like "B.Tech", "B.E", "M.Tech", "BCA" etc.
+    # Then match if either contains the other's core
+
+    def extract_core(branch_str):
+        """Remove degree prefix and normalize branch string."""
+        import re
+        if not branch_str:
+            return ""
+        s = branch_str.strip().lower()
+        # Remove common degree prefixes
+        prefixes = [
+            'b.tech - ', 'b.tech-', 'b.tech ', 'btech ',
+            'b.e - ', 'b.e-', 'b.e ',
+            'm.tech - ', 'm.tech-', 'm.tech ',
+            'bca - ', 'bca-', 'bca ',
+            'mca - ', 'mca-', 'mca ',
+            'mba - ', 'mba-', 'mba ',
+            'b.sc - ', 'b.sc-', 'b.sc ',
+            'b.pharma - ', 'b.pharma ',
+        ]
+        for p in prefixes:
+            if s.startswith(p):
+                s = s[len(p):]
+                break
+        # Remove special chars for comparison
+        s = re.sub(r'[\s\-_]+', ' ', s).strip()
+        return s
+
     if effective_branch:
         eb = effective_branch.strip().lower()
+        eb_core = extract_core(eb)
+
         if current_user.role == UserRole.student:
             q = q.filter(
                 or_(
+                    # NULL/empty branch = applies to all students
                     TimetableSlot.branch == None,
                     TimetableSlot.branch == '',
+
+                    # Exact match (case-insensitive)
                     func.lower(TimetableSlot.branch) == eb,
-                    func.lower(TimetableSlot.branch).contains(eb),
-                    func.lower(TimetableSlot.branch).contains(eb.split('(')[0].strip()),
-                    func.instr(func.lower(TimetableSlot.branch),
-                               eb.split('(')[0].strip()) > 0,
+
+                    # Slot branch contains user branch
+                    # e.g. slot="B.Tech CSE (AI-ML-DL)" contains user="CSE (AI-ML-DL)"
+                    func.instr(func.lower(TimetableSlot.branch), eb) > 0,
+
+                    # User branch contains slot branch
+                    # e.g. slot="CSE" inside user="CSE (AI-ML-DL)"
+                    func.instr(eb, func.lower(TimetableSlot.branch)) > 0,
+
+                    # Core keyword match — strip degree prefix from slot and compare
+                    # e.g. slot="B.Tech CSE (AI-ML-DL)" → core="cse (ai-ml-dl)" == user core
+                    func.instr(
+                        func.lower(TimetableSlot.branch),
+                        eb_core
+                    ) > 0 if eb_core else False,
+
+                    # Match on just the specialization part before parenthesis
+                    # e.g. "CSE" matches "CSE (AI-ML-DL)" and "B.Tech CSE (AI-ML-DL)"
+                    func.instr(
+                        func.lower(TimetableSlot.branch),
+                        eb_core.split('(')[0].strip()
+                    ) > 0 if eb_core and '(' in eb_core else False,
                 )
             )
         else:
+            # Admin/Faculty: filter by branch if provided
             q = q.filter(
                 or_(
                     func.lower(TimetableSlot.branch) == eb,
-                    func.lower(TimetableSlot.branch).contains(eb),
+                    func.instr(func.lower(TimetableSlot.branch), eb) > 0,
+                    func.instr(eb, func.lower(TimetableSlot.branch)) > 0,
                 )
+            )
             )
 
     # Section filter:
