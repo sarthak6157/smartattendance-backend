@@ -184,7 +184,6 @@ def list_slots(
                     func.instr(eb, func.lower(TimetableSlot.branch)) > 0,
                 )
             )
-            )
 
     # Section filter:
     # Students see their main section (theory) AND their subsection (labs)
