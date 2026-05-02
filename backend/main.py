@@ -10,15 +10,49 @@ from starlette.requests import Request
 
 app = FastAPI(title="Smart Attendance System API", version="3.0.0")
 
+# ── Global exception handler — ensures CORS headers on ALL 500 errors ────────
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    origin = request.headers.get("origin", "*")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+        headers={
+            "Access-Control-Allow-Origin":      origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods":     "*",
+            "Access-Control-Allow-Headers":     "*",
+        },
+    )
+
 # ── CORS must be added FIRST so it wraps everything ──────────────────────────
-# allow_origins=["*"] with allow_credentials=False works for all domains
+import os
+
+# Get allowed origins from environment or use defaults
+FRONTEND_URL  = os.getenv("FRONTEND_URL",  "https://sarthak6157-smartattendance-fronten.vercel.app")
+FRONTEND_URL2 = os.getenv("FRONTEND_URL2", "https://smartattendance-frontend.vercel.app")
+
+ALLOWED_ORIGINS = [
+    FRONTEND_URL,
+    FRONTEND_URL2,
+    "http://localhost:3000",
+    "http://localhost:8000",
+    "http://localhost:5173",
+    "http://127.0.0.1:8000",
+]
+# Also add any extra origins from env (comma separated)
+EXTRA = os.getenv("EXTRA_ORIGINS", "")
+if EXTRA:
+    ALLOWED_ORIGINS += [o.strip() for o in EXTRA.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app",  # allow ALL vercel deployments
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
