@@ -23,15 +23,16 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 from routers import (auth, users, sessions, attendance,
-                     courses, settings as settings_router, timetable)
+                     courses, settings as settings_router, timetable, notifications)
 
-app.include_router(auth.router,            prefix="/api/auth",       tags=["Auth"])
-app.include_router(users.router,           prefix="/api/users",      tags=["Users"])
-app.include_router(sessions.router,        prefix="/api/sessions",   tags=["Sessions"])
-app.include_router(attendance.router,      prefix="/api/attendance", tags=["Attendance"])
-app.include_router(courses.router,         prefix="/api/courses",    tags=["Courses"])
-app.include_router(settings_router.router, prefix="/api/settings",   tags=["Settings"])
-app.include_router(timetable.router,       prefix="/api/timetable",  tags=["Timetable"])
+app.include_router(auth.router,            prefix="/api/auth",          tags=["Auth"])
+app.include_router(users.router,           prefix="/api/users",         tags=["Users"])
+app.include_router(sessions.router,        prefix="/api/sessions",      tags=["Sessions"])
+app.include_router(attendance.router,      prefix="/api/attendance",    tags=["Attendance"])
+app.include_router(courses.router,         prefix="/api/courses",       tags=["Courses"])
+app.include_router(settings_router.router, prefix="/api/settings",      tags=["Settings"])
+app.include_router(timetable.router,       prefix="/api/timetable",     tags=["Timetable"])
+app.include_router(notifications.router,   prefix="/api/notifications", tags=["Notifications"])
 
 # ── Startup — create tables + seed ────────────────────────────────────────────
 @app.on_event("startup")

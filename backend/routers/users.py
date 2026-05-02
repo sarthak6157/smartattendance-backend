@@ -119,3 +119,115 @@ def delete_user(user_id: int, current_admin: User = Depends(AdminOnly), db: Sess
     user = db.query(User).filter(User.id == user_id).first()
     if not user: raise HTTPException(status_code=404, detail="User not found.")
     db.delete(user); db.commit()
+
+
+# ── Bulk Import ────────────────────────────────────────────────────────────────
+import csv, io
+from fastapi import UploadFile, File
+
+@router.post("/bulk-import", status_code=200)
+async def bulk_import_students(
+    file: UploadFile = File(...),
+    _: User = Depends(AdminOnly),
+    db: Session = Depends(get_db),
+):
+    """
+    Import students from a CSV file.
+    Required columns: full_name, inst_id, email, password
+    Optional columns: branch, section, semester, course_type
+    """
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")  # utf-8-sig handles Excel BOM
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+
+    # Validate required columns
+    required = {"full_name", "inst_id", "email", "password"}
+    if not reader.fieldnames or not required.issubset(set(f.strip() for f in reader.fieldnames)):
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV must have columns: {', '.join(required)}. Found: {reader.fieldnames}"
+        )
+
+    created, skipped, errors = [], [], []
+
+    for i, row in enumerate(reader, start=2):  # row 1 = header
+        row = {k.strip(): v.strip() for k, v in row.items() if k}
+        inst_id = row.get("inst_id", "").strip()
+        email   = row.get("email", "").strip()
+        name    = row.get("full_name", "").strip()
+        pwd     = row.get("password", "").strip()
+
+        if not all([inst_id, email, name, pwd]):
+            errors.append({"row": i, "reason": "Missing required field", "data": inst_id or email})
+            continue
+
+        # Check duplicate
+        exists = db.query(User).filter(
+            (User.inst_id == inst_id) | (User.email == email)
+        ).first()
+        if exists:
+            skipped.append({"row": i, "inst_id": inst_id, "reason": "Already exists"})
+            continue
+
+        branch   = row.get("branch", "")
+        section  = row.get("section", "")
+        semester = row.get("semester", "")
+        course   = row.get("course_type", "")
+
+        try:
+            new_user = User(
+                full_name       = name,
+                inst_id         = inst_id,
+                email           = email,
+                role            = UserRole.student,
+                status          = UserStatus.active,
+                hashed_password = hash_password(pwd),
+                department      = branch,
+                branch          = branch,
+                section         = section,
+                semester        = semester,
+                course          = course,
+            )
+            db.add(new_user)
+            db.flush()  # get ID without committing
+            created.append({"row": i, "inst_id": inst_id, "name": name})
+        except Exception as e:
+            errors.append({"row": i, "reason": str(e), "data": inst_id})
+
+    db.commit()
+
+    return {
+        "summary": {
+            "total_rows": len(created) + len(skipped) + len(errors),
+            "created":    len(created),
+            "skipped":    len(skipped),
+            "errors":     len(errors),
+        },
+        "created": created,
+        "skipped": skipped,
+        "errors":  errors,
+    }
+
+
+@router.get("/bulk-import/template")
+def download_template(_: User = Depends(AdminOnly)):
+    """Download a sample CSV template for bulk import."""
+    sample = (
+        "full_name,inst_id,email,password,branch,section,semester,course_type\n"
+        "John Doe,2300123456,john@tmu.ac.in,Pass@1234,B.Tech AI,A,2nd,B.Tech\n"
+        "Jane Smith,2300123457,jane@tmu.ac.in,Pass@1234,B.Tech AI,A,2nd,B.Tech\n"
+        "Rahul Kumar,2300123458,rahul@tmu.ac.in,Pass@1234,B.Tech AI,B,2nd,B.Tech\n"
+    )
+    from fastapi.responses import Response
+    return Response(
+        content=sample,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=student_import_template.csv"}
+    )
