@@ -46,8 +46,13 @@ class SlotOut(BaseModel):
     is_active:   bool
     course_name: Optional[str] = None
     faculty_name:Optional[str] = None
-    class Config:
-        from_attributes = True
+
+    model_config = {"from_attributes": True, "use_enum_values": True}
+
+    def model_post_init(self, __context):
+        # Ensure day_of_week is always a plain string not enum object
+        if hasattr(self.day_of_week, 'value'):
+            object.__setattr__(self, 'day_of_week', self.day_of_week.value)
 
 class GoLiveRequest(BaseModel):
     gps_lat: Optional[str] = None
@@ -168,7 +173,9 @@ def list_slots(
         co  = db.query(Course).filter(Course.id == s.course_id).first()
         fac = db.query(User).filter(User.id == s.faculty_id).first()
         d = SlotOut.model_validate(s)
-        d.course_name  = co.name  if co  else None
+        # Explicitly convert enum to string value
+        d.day_of_week  = s.day_of_week.value if hasattr(s.day_of_week, 'value') else str(s.day_of_week)
+        d.course_name  = co.name       if co  else None
         d.faculty_name = fac.full_name if fac else None
         result.append(d)
     return result
