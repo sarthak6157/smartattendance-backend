@@ -149,7 +149,12 @@ def create_slot(
     fac = db.query(User).filter(User.id == payload.faculty_id, User.role == UserRole.faculty).first()
     if not co:  raise HTTPException(status_code=404, detail="Course not found.")
     if not fac: raise HTTPException(status_code=404, detail="Faculty not found.")
-    slot = TimetableSlot(**payload.model_dump())
+
+    # Normalize day_of_week to lowercase to match DB enum
+    data = payload.model_dump()
+    data['day_of_week'] = data['day_of_week'].strip().lower()
+
+    slot = TimetableSlot(**data)
     db.add(slot); db.commit(); db.refresh(slot)
     d = SlotOut.model_validate(slot)
     d.course_name = co.name; d.faculty_name = fac.full_name
