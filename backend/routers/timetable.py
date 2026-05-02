@@ -102,18 +102,35 @@ def list_slots(
         effective_section    = section
         effective_subsection = None
 
-    # Case-insensitive branch match
-    # For students: also include slots where branch is NULL (applies to all students)
+    # Branch match — flexible so format differences don't break it.
+    # Student branch: "CSE (AI-ML-DL)"
+    # Slot branch might be: "CSE (AI-ML-DL)", "B.Tech - CSE (AI-ML-DL)", "CSE", "B.Tech CSE" etc.
+    # Strategy:
+    #   1. Exact match (case-insensitive)
+    #   2. Slot branch CONTAINS student branch (e.g. slot="B.Tech - CSE (AI-ML-DL)" ⊇ stu="CSE (AI-ML-DL)")
+    #   3. Student branch CONTAINS slot branch (e.g. slot="CSE" ⊆ stu="CSE (AI-ML-DL)")
+    #   4. NULL slot branch = applies to everyone
     if effective_branch:
+        eb = effective_branch.strip().lower()
         if current_user.role == UserRole.student:
             q = q.filter(
                 or_(
                     TimetableSlot.branch == None,
-                    func.lower(TimetableSlot.branch) == effective_branch.strip().lower()
+                    TimetableSlot.branch == '',
+                    func.lower(TimetableSlot.branch) == eb,
+                    func.lower(TimetableSlot.branch).contains(eb),
+                    func.lower(TimetableSlot.branch).contains(eb.split('(')[0].strip()),
+                    func.instr(func.lower(TimetableSlot.branch),
+                               eb.split('(')[0].strip()) > 0,
                 )
             )
         else:
-            q = q.filter(func.lower(TimetableSlot.branch) == effective_branch.strip().lower())
+            q = q.filter(
+                or_(
+                    func.lower(TimetableSlot.branch) == eb,
+                    func.lower(TimetableSlot.branch).contains(eb),
+                )
+            )
 
     # Section filter:
     # Students see their main section (theory) AND their subsection (labs)
