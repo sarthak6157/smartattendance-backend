@@ -103,13 +103,23 @@ def list_slots(
         effective_subsection = None
 
     # Case-insensitive branch match
+    # For students: also include slots where branch is NULL (applies to all students)
     if effective_branch:
-        q = q.filter(func.lower(TimetableSlot.branch) == effective_branch.strip().lower())
+        if current_user.role == UserRole.student:
+            q = q.filter(
+                or_(
+                    TimetableSlot.branch == None,
+                    func.lower(TimetableSlot.branch) == effective_branch.strip().lower()
+                )
+            )
+        else:
+            q = q.filter(func.lower(TimetableSlot.branch) == effective_branch.strip().lower())
 
     # Section filter:
     # Students see their main section (theory) AND their subsection (labs)
     # If slot has sub_section set → only students whose course matches sub_section can see it
     # If slot has no sub_section → all students in that section can see it
+    # Slots with NULL section are visible to all students (no section filter applied)
     if effective_section:
         sec = effective_section.strip().upper()
         if current_user.role == UserRole.student and effective_subsection:
@@ -125,7 +135,15 @@ def list_slots(
                 )
             )
         else:
-            q = q.filter(func.lower(TimetableSlot.section) == sec.lower())
+            if current_user.role == UserRole.student:
+                q = q.filter(
+                    or_(
+                        TimetableSlot.section == None,
+                        func.lower(TimetableSlot.section) == sec.lower()
+                    )
+                )
+            else:
+                q = q.filter(func.lower(TimetableSlot.section) == sec.lower())
 
     slots = q.order_by(TimetableSlot.day_of_week, TimetableSlot.start_time).all()
     result = []
