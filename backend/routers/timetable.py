@@ -148,26 +148,26 @@ def list_slots(
         eb_short = eb_core.split('(')[0].strip() if eb_core else ''
 
         if current_user.role == UserRole.student:
-            # Build conditions list dynamically to avoid False in or_()
+            # Use func.strpos() which works on PostgreSQL/Supabase
+            # strpos(string, substring) returns 0 if not found, >0 if found
             conditions = [
                 TimetableSlot.branch == None,
                 TimetableSlot.branch == '',
                 func.lower(TimetableSlot.branch) == eb,
-                func.instr(func.lower(TimetableSlot.branch), eb) > 0,
-                func.instr(eb, func.lower(TimetableSlot.branch)) > 0,
+                func.strpos(func.lower(TimetableSlot.branch), eb) > 0,
+                func.strpos(eb, func.lower(TimetableSlot.branch)) > 0,
             ]
             if eb_core:
-                conditions.append(func.instr(func.lower(TimetableSlot.branch), eb_core) > 0)
+                conditions.append(func.strpos(func.lower(TimetableSlot.branch), eb_core) > 0)
             if eb_short:
-                conditions.append(func.instr(func.lower(TimetableSlot.branch), eb_short) > 0)
+                conditions.append(func.strpos(func.lower(TimetableSlot.branch), eb_short) > 0)
             q = q.filter(or_(*conditions))
         else:
-            # Admin/Faculty: filter by branch if provided
             q = q.filter(
                 or_(
                     func.lower(TimetableSlot.branch) == eb,
-                    func.instr(func.lower(TimetableSlot.branch), eb) > 0,
-                    func.instr(eb, func.lower(TimetableSlot.branch)) > 0,
+                    func.strpos(func.lower(TimetableSlot.branch), eb) > 0,
+                    func.strpos(eb, func.lower(TimetableSlot.branch)) > 0,
                 )
             )
 
@@ -186,7 +186,7 @@ def list_slots(
                     func.lower(TimetableSlot.section) == sec.lower(),
                     or_(
                         TimetableSlot.sub_section == None,          # theory — no sub_section
-                        func.upper(TimetableSlot.sub_section) == subsec  # lab matching subsection
+                        func.lower(TimetableSlot.sub_section) == subsec.lower()  # lab matching subsection
                     )
                 )
             )
