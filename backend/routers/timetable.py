@@ -75,7 +75,7 @@ def debug_student_match(
         "student_branch":      current_user.branch,
         "student_department":  current_user.department,
         "student_section":     current_user.section,
-        "student_subsection":  current_user.course,
+        "student_sub_section": current_user.sub_section,   # ← FIXED: was current_user.course
         "timetable_branches":  [r[0] for r in all_branches],
         "timetable_sections":  [r[0] for r in all_sections],
     }
@@ -97,25 +97,23 @@ def list_slots(
     elif faculty_id:
         q = q.filter(TimetableSlot.faculty_id == faculty_id)
 
-    # For students: auto-inject their branch/section if not passed
+    # For students: auto-inject their branch/section/sub_section
     if current_user.role == UserRole.student:
         effective_branch     = branch   or current_user.branch or current_user.department
         effective_section    = section  or current_user.section
-        # sub_section (lab batch like A1/A2) — only use if it looks like a batch
-        # NOT a degree like "B.Tech" which is stored in course field
-        raw_subsec = current_user.course or ""
-        # Only use as subsection if it's short (<=4 chars) like A1, A2, B1 etc.
-        effective_subsection = raw_subsec.strip() if len(raw_subsec.strip()) <= 4 and raw_subsec.strip() not in ["B.Tech","B.E","BCA","MCA","MBA","M.Tech","B.Sc"] else None
+        # ── FIX: read sub_section directly from the users table ──────────────
+        # Previously this was reading current_user.course (which holds "B.Tech")
+        # and trying to guess if it was a lab batch — that was always wrong.
+        # Now we read current_user.sub_section which is the actual DB column.
+        effective_subsection = (current_user.sub_section or "").strip() or None
     else:
         effective_branch     = branch
         effective_section    = section
         effective_subsection = None
 
-    # ── Permanent Branch Matching Fix ─────────────────────────────────────────
-    # Problem: slot branch = "B.Tech CSE (AI-ML-DL)" but user branch = "CSE (AI-ML-DL)"
-    # Solution: extract CORE keywords from both and match on those
-    # Core = remove common prefixes like "B.Tech", "B.E", "M.Tech", "BCA" etc.
-    # Then match if either contains the other's core
+    # ── Branch Matching ───────────────────────────────────────────────────────
+    # Problem: slot branch = "CSE(AI-ML-DL)" but user branch = "CSE (AI-ML-DL)"
+    # Solution: extract CORE keywords and match loosely
 
     def extract_core(branch_str):
         """Remove degree prefix and normalize branch string."""
@@ -123,7 +121,6 @@ def list_slots(
         if not branch_str:
             return ""
         s = branch_str.strip().lower()
-        # Remove common degree prefixes
         prefixes = [
             'b.tech - ', 'b.tech-', 'b.tech ', 'btech ',
             'b.e - ', 'b.e-', 'b.e ',
@@ -138,7 +135,6 @@ def list_slots(
             if s.startswith(p):
                 s = s[len(p):]
                 break
-        # Remove special chars for comparison
         s = re.sub(r'[\s\-_]+', ' ', s).strip()
         return s
 
@@ -148,8 +144,6 @@ def list_slots(
         eb_short = eb_core.split('(')[0].strip() if eb_core else ''
 
         if current_user.role == UserRole.student:
-            # Use func.strpos() which works on PostgreSQL/Supabase
-            # strpos(string, substring) returns 0 if not found, >0 if found
             conditions = [
                 TimetableSlot.branch == None,
                 TimetableSlot.branch == '',
@@ -171,35 +165,44 @@ def list_slots(
                 )
             )
 
-    # Section filter:
-    # Students see their main section (theory) AND their subsection (labs)
-    # If slot has sub_section set → only students whose course matches sub_section can see it
-    # If slot has no sub_section → all students in that section can see it
-    # Slots with NULL section are visible to all students (no section filter applied)
+    # ── Section + Sub-section Filter ─────────────────────────────────────────
+    #
+    # How lab slots work in your timetable_slots table:
+    #   Theory slots → section = "A",  sub_section = NULL
+    #   Lab slots    → section = "A1", sub_section = NULL   (section IS the batch)
+    #
+    # A student with section="A" and sub_section="A1" should see:
+    #   - All theory slots where slot.section = "A"
+    #   - Their lab slots where slot.section = "A1"
+    #
+    # So the query becomes:
+    #   slot.section = student.section   (catches theory)
+    #   OR slot.section = student.sub_section  (catches labs)
+
     if effective_section:
         sec = effective_section.strip().upper()
-        if current_user.role == UserRole.student and effective_subsection:
-            subsec = effective_subsection.strip().upper()
-            from sqlalchemy import and_, or_
-            q = q.filter(
-                and_(
-                    func.lower(TimetableSlot.section) == sec.lower(),
-                    or_(
-                        TimetableSlot.sub_section == None,          # theory — no sub_section
-                        func.lower(TimetableSlot.sub_section) == subsec.lower()  # lab matching subsection
-                    )
-                )
-            )
-        else:
-            if current_user.role == UserRole.student:
+
+        if current_user.role == UserRole.student:
+            if effective_subsection:
+                subsec = effective_subsection.strip().upper()
+                from sqlalchemy import and_, or_
+                # Student sees: theory (section=A) OR their lab batch (section=A1)
                 q = q.filter(
                     or_(
-                        TimetableSlot.section == None,
-                        func.lower(TimetableSlot.section) == sec.lower()
+                        func.upper(TimetableSlot.section) == sec,        # theory rows
+                        func.upper(TimetableSlot.section) == subsec,     # lab rows
                     )
                 )
             else:
-                q = q.filter(func.lower(TimetableSlot.section) == sec.lower())
+                # No sub_section assigned — only show main section slots
+                q = q.filter(
+                    or_(
+                        TimetableSlot.section == None,
+                        func.upper(TimetableSlot.section) == sec,
+                    )
+                )
+        else:
+            q = q.filter(func.lower(TimetableSlot.section) == sec.lower())
 
     slots = q.order_by(TimetableSlot.day_of_week, TimetableSlot.start_time).all()
     result = []
@@ -268,7 +271,6 @@ def go_live(
     now = datetime.utcnow()
 
     # ── Time window check ──────────────────────────────────────────────────
-    # Convert IST slot times to check against current IST time
     # IST = UTC + 5:30
     from datetime import timedelta
     ist_now = now + timedelta(hours=5, minutes=30)
