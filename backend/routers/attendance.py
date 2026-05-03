@@ -183,7 +183,7 @@ from models.models import Course
 @router.get("/export/session/{session_id}")
 def export_session_attendance(
     session_id: int,
-    format: str = Query("excel", regex="^(excel|csv)$"),
+    format: str = Query("excel", pattern="^(excel|csv)$"),
     current_user: User = Depends(require_roles(UserRole.faculty, UserRole.admin)),
     db: DBSession = Depends(get_db),
 ):
@@ -317,7 +317,7 @@ def export_session_attendance(
 @router.get("/export/student/{student_id}")
 def export_student_attendance(
     student_id: int,
-    format: str = Query("excel", regex="^(excel|csv)$"),
+    format: str = Query("excel", pattern="^(excel|csv)$"),
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):

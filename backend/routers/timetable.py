@@ -100,8 +100,12 @@ def list_slots(
     # For students: auto-inject their branch/section if not passed
     if current_user.role == UserRole.student:
         effective_branch     = branch   or current_user.branch or current_user.department
-        effective_section    = section  or current_user.section   # e.g. "A"
-        effective_subsection = current_user.course                # e.g. "A1" or "A2"
+        effective_section    = section  or current_user.section
+        # sub_section (lab batch like A1/A2) — only use if it looks like a batch
+        # NOT a degree like "B.Tech" which is stored in course field
+        raw_subsec = current_user.course or ""
+        # Only use as subsection if it's short (<=4 chars) like A1, A2, B1 etc.
+        effective_subsection = raw_subsec.strip() if len(raw_subsec.strip()) <= 4 and raw_subsec.strip() not in ["B.Tech","B.E","BCA","MCA","MBA","M.Tech","B.Sc"] else None
     else:
         effective_branch     = branch
         effective_section    = section
@@ -141,40 +145,22 @@ def list_slots(
     if effective_branch:
         eb = effective_branch.strip().lower()
         eb_core = extract_core(eb)
+        eb_short = eb_core.split('(')[0].strip() if eb_core else ''
 
         if current_user.role == UserRole.student:
-            q = q.filter(
-                or_(
-                    # NULL/empty branch = applies to all students
-                    TimetableSlot.branch == None,
-                    TimetableSlot.branch == '',
-
-                    # Exact match (case-insensitive)
-                    func.lower(TimetableSlot.branch) == eb,
-
-                    # Slot branch contains user branch
-                    # e.g. slot="B.Tech CSE (AI-ML-DL)" contains user="CSE (AI-ML-DL)"
-                    func.instr(func.lower(TimetableSlot.branch), eb) > 0,
-
-                    # User branch contains slot branch
-                    # e.g. slot="CSE" inside user="CSE (AI-ML-DL)"
-                    func.instr(eb, func.lower(TimetableSlot.branch)) > 0,
-
-                    # Core keyword match — strip degree prefix from slot and compare
-                    # e.g. slot="B.Tech CSE (AI-ML-DL)" → core="cse (ai-ml-dl)" == user core
-                    func.instr(
-                        func.lower(TimetableSlot.branch),
-                        eb_core
-                    ) > 0 if eb_core else False,
-
-                    # Match on just the specialization part before parenthesis
-                    # e.g. "CSE" matches "CSE (AI-ML-DL)" and "B.Tech CSE (AI-ML-DL)"
-                    func.instr(
-                        func.lower(TimetableSlot.branch),
-                        eb_core.split('(')[0].strip()
-                    ) > 0 if eb_core and '(' in eb_core else False,
-                )
-            )
+            # Build conditions list dynamically to avoid False in or_()
+            conditions = [
+                TimetableSlot.branch == None,
+                TimetableSlot.branch == '',
+                func.lower(TimetableSlot.branch) == eb,
+                func.instr(func.lower(TimetableSlot.branch), eb) > 0,
+                func.instr(eb, func.lower(TimetableSlot.branch)) > 0,
+            ]
+            if eb_core:
+                conditions.append(func.instr(func.lower(TimetableSlot.branch), eb_core) > 0)
+            if eb_short:
+                conditions.append(func.instr(func.lower(TimetableSlot.branch), eb_short) > 0)
+            q = q.filter(or_(*conditions))
         else:
             # Admin/Faculty: filter by branch if provided
             q = q.filter(
