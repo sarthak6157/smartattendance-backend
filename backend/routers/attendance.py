@@ -194,8 +194,23 @@ def export_session_attendance(
 
     # Get all students in this section/branch
     q = db.query(User).filter(User.role == UserRole.student, User.status == "active")
-    if session.branch:  q = q.filter(User.branch  == session.branch)
-    if session.section: q = q.filter(User.section == session.section)
+    if session.branch:
+        # Use flexible branch matching to handle format differences
+        # e.g. "CSE(AI-ML-DL)" matches "B.Tech CSE (AI-ML-DL)"
+        from sqlalchemy import func
+        sb = session.branch.strip().lower()
+        # Extract core branch (remove degree prefix)
+        import re
+        sb_core = re.sub(r'^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', sb, flags=re.IGNORECASE).strip()
+        q = q.filter(
+            (func.lower(User.branch) == sb) |
+            (func.lower(User.branch).contains(sb_core)) |
+            (func.lower(User.branch).contains(sb)) |
+            (func.instr(func.lower(User.department), sb_core) > 0)
+        )
+    if session.section: q = q.filter(
+        func.lower(User.section) == session.section.strip().lower()
+    )
     students = q.order_by(User.full_name).all()
 
     # Get attendance records
