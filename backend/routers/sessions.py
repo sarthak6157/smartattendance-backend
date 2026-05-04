@@ -46,9 +46,30 @@ def get_active(
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
+    from sqlalchemy import func, or_
+    import re
     q = db.query(Session).filter(Session.status == SessionStatus.active)
-    if branch:  q = q.filter(Session.branch  == branch)
-    if section: q = q.filter(Session.section == section)
+
+    if branch:
+        # Flexible matching: handle "CSE(AI-ML-DL)" vs "B.Tech CSE (AI-ML-DL)"
+        b = branch.strip().lower()
+        b_core = re.sub(r'^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b, flags=re.IGNORECASE).strip()
+        q = q.filter(or_(
+            Session.branch == None,
+            Session.branch == '',
+            func.lower(Session.branch) == b,
+            func.instr(func.lower(Session.branch), b_core) > 0,
+            func.instr(b, func.lower(Session.branch)) > 0,
+        ))
+
+    if section:
+        sec = section.strip().upper()
+        q = q.filter(or_(
+            Session.section == None,
+            Session.section == '',
+            func.upper(Session.section) == sec,
+        ))
+
     return q.all()
 
 
