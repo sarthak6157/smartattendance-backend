@@ -280,16 +280,17 @@ def go_live(
     start_mins = slot_start_h * 60 + slot_start_m - 5   # 5-min early buffer
     end_mins   = slot_end_h   * 60 + slot_end_m
 
-    if now_mins < start_mins:
+    # Allow Go Live from 30 min before class until 60 min after it ends
+    if now_mins < start_mins - 30:
         mins_until = (slot_start_h*60+slot_start_m) - now_mins
         raise HTTPException(
             status_code=400,
-            detail=f"Class hasn't started yet. Go Live opens {mins_until} minutes before class ({slot.start_time})."
+            detail=f"Too early. Go Live opens 30 minutes before class at {slot.start_time} (in {mins_until} minutes)."
         )
-    if now_mins > end_mins:
+    if now_mins > end_mins + 60:
         raise HTTPException(
             status_code=400,
-            detail=f"Class time is over ({slot.end_time}). Go Live is locked after class ends."
+            detail=f"Class ended at {slot.end_time}. Go Live is locked 60 minutes after class ends."
         )
 
     session = Session(
