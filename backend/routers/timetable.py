@@ -148,20 +148,20 @@ def list_slots(
                 TimetableSlot.branch == None,
                 TimetableSlot.branch == '',
                 func.lower(TimetableSlot.branch) == eb,
-                func.strpos(func.lower(TimetableSlot.branch), eb) > 0,
-                func.strpos(eb, func.lower(TimetableSlot.branch)) > 0,
+                TimetableSlot.branch.ilike(f'%{eb}%'),
+                TimetableSlot.branch.ilike(f'%{eb}%'),
             ]
             if eb_core:
-                conditions.append(func.strpos(func.lower(TimetableSlot.branch), eb_core) > 0)
+                conditions.append(TimetableSlot.branch.ilike(f'%{eb_core}%'))
             if eb_short:
-                conditions.append(func.strpos(func.lower(TimetableSlot.branch), eb_short) > 0)
+                conditions.append(TimetableSlot.branch.ilike(f'%{eb_short}%'))
             q = q.filter(or_(*conditions))
         else:
             q = q.filter(
                 or_(
                     func.lower(TimetableSlot.branch) == eb,
-                    func.strpos(func.lower(TimetableSlot.branch), eb) > 0,
-                    func.strpos(eb, func.lower(TimetableSlot.branch)) > 0,
+                    TimetableSlot.branch.ilike(f'%{eb}%'),
+                    TimetableSlot.branch.ilike(f'%{eb}%'),
                 )
             )
 
