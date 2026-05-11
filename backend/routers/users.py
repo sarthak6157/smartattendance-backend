@@ -46,7 +46,18 @@ def list_users(
         q = q.filter(User.role == role)
 
     if status_:          q = q.filter(User.status == status_)
-    if branch:           q = q.filter(User.branch.ilike(branch))
+    if branch:
+        # Flexible match: "CSE(AI-ML-DL)" matches "B.Tech - CSE (AI-ML-DL)" and vice versa
+        import re as _re
+        b_raw  = branch.strip()
+        b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc|b\.c\.a)[\s\-]+', '', b_raw).strip()
+        from sqlalchemy import func as _func, or_ as _or
+        q = q.filter(_or(
+            User.branch.ilike(b_raw),
+            User.branch.ilike(f'%{b_core}%'),
+            User.branch.ilike(f'%{b_raw}%'),
+            User.department.ilike(f'%{b_core}%'),
+        ))
     if section:          q = q.filter(User.section == section)
     if semester:         q = q.filter(User.semester == semester)
     if course:           q = q.filter(User.course.ilike(course))
