@@ -32,8 +32,23 @@ def list_sessions(
         q = q.filter(Session.faculty_id == faculty_id)
     if course_id: q = q.filter(Session.course_id == course_id)
     if status_:   q = q.filter(Session.status == status_)
-    if branch:    q = q.filter(Session.branch == branch)
-    if section:   q = q.filter(Session.section == section)
+    if branch:
+        import re as _re
+        from sqlalchemy import func as _func, or_ as _or
+        b_raw  = branch.strip()
+        b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b_raw).strip()
+        q = q.filter(_or(
+            Session.branch == None, Session.branch == '',
+            Session.branch.ilike(b_raw),
+            Session.branch.ilike(f'%{b_core}%'),
+            _func.instr(_func.lower(Session.branch), b_core.lower()) > 0,
+            _func.instr(b_raw.lower(), _func.lower(Session.branch)) > 0,
+        ))
+    if section:
+        q = q.filter(_or(
+            Session.section == None, Session.section == '',
+            _func.upper(Session.section) == section.strip().upper(),
+        ))
     total    = q.count()
     sessions = q.order_by(Session.scheduled_at.desc()).offset(skip).limit(limit).all()
     return {"total": total, "sessions": sessions}
