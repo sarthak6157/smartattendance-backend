@@ -204,9 +204,9 @@ def export_session_attendance(
         sb_core = re.sub(r'^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', sb, flags=re.IGNORECASE).strip()
         q = q.filter(
             (func.lower(User.branch) == sb) |
-            (func.lower(User.branch).contains(sb_core)) |
-            (func.lower(User.branch).contains(sb)) |
-            (func.instr(func.lower(User.department), sb_core) > 0)
+            (User.branch.ilike(f'%{sb_core}%')) |
+            (User.branch.ilike(f'%{sb}%')) |
+            (User.department.ilike(f'%{sb_core}%'))
         )
     if session.section: q = q.filter(
         func.lower(User.section) == session.section.strip().lower()
