@@ -1,3 +1,4 @@
+
 """Session routes — faculty ends live sessions only."""
 import secrets
 from datetime import datetime
@@ -41,8 +42,7 @@ def list_sessions(
             Session.branch == None, Session.branch == '',
             Session.branch.ilike(b_raw),
             Session.branch.ilike(f'%{b_core}%'),
-            _func.instr(_func.lower(Session.branch), b_core.lower()) > 0,
-            _func.instr(b_raw.lower(), _func.lower(Session.branch)) > 0,
+            Session.branch.ilike(f'%{b_raw}%'),
         ))
     if section:
         q = q.filter(_or(
@@ -73,8 +73,8 @@ def get_active(
             Session.branch == None,
             Session.branch == '',
             func.lower(Session.branch) == b,
-            func.instr(func.lower(Session.branch), b_core) > 0,
-            func.instr(b, func.lower(Session.branch)) > 0,
+            Session.branch.ilike(f'%{b_core}%'),
+            Session.branch.ilike(f'%{b}%'),
         ))
 
     if section:
