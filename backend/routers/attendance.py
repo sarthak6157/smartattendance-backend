@@ -562,8 +562,22 @@ def section_insights(
 ):
     """AI insights for an entire section — identify at-risk students."""
     q = db.query(User).filter(User.role == UserRole.student, User.status == "active")
-    if branch:  q = q.filter(User.branch  == branch)
-    if section: q = q.filter(User.section == section)
+    if branch:
+        import re as _re
+        from sqlalchemy import func as _func, or_ as _or
+        b_raw  = branch.strip()
+        b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b_raw).strip()
+        q = q.filter(_or(
+            User.branch.ilike(b_raw),
+            User.branch.ilike(f'%{b_core}%'),
+            User.branch.ilike(f'%{b_raw}%'),
+            User.department.ilike(f'%{b_core}%'),
+        ))
+    if section:
+        from sqlalchemy import func as _func2, or_ as _or2
+        q = q.filter(_or2(
+            _func2.upper(User.section) == section.strip().upper(),
+        ))
     students = q.all()
 
     total_sessions = db.query(Session).filter(
