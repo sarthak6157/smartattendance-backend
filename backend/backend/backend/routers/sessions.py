@@ -1,4 +1,3 @@
-
 """Session routes — faculty ends live sessions only."""
 import secrets
 from datetime import datetime
@@ -33,22 +32,8 @@ def list_sessions(
         q = q.filter(Session.faculty_id == faculty_id)
     if course_id: q = q.filter(Session.course_id == course_id)
     if status_:   q = q.filter(Session.status == status_)
-    if branch:
-        import re as _re
-        from sqlalchemy import func as _func, or_ as _or
-        b_raw  = branch.strip()
-        b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b_raw).strip()
-        q = q.filter(_or(
-            Session.branch == None, Session.branch == '',
-            Session.branch.ilike(b_raw),
-            Session.branch.ilike(f'%{b_core}%'),
-            Session.branch.ilike(f'%{b_raw}%'),
-        ))
-    if section:
-        q = q.filter(_or(
-            Session.section == None, Session.section == '',
-            _func.upper(Session.section) == section.strip().upper(),
-        ))
+    if branch:    q = q.filter(Session.branch == branch)
+    if section:   q = q.filter(Session.section == section)
     total    = q.count()
     sessions = q.order_by(Session.scheduled_at.desc()).offset(skip).limit(limit).all()
     return {"total": total, "sessions": sessions}
@@ -61,30 +46,9 @@ def get_active(
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    from sqlalchemy import func, or_
-    import re
     q = db.query(Session).filter(Session.status == SessionStatus.active)
-
-    if branch:
-        # Flexible matching: handle "CSE(AI-ML-DL)" vs "B.Tech CSE (AI-ML-DL)"
-        b = branch.strip().lower()
-        b_core = re.sub(r'^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b, flags=re.IGNORECASE).strip()
-        q = q.filter(or_(
-            Session.branch == None,
-            Session.branch == '',
-            func.lower(Session.branch) == b,
-            Session.branch.ilike(f'%{b_core}%'),
-            Session.branch.ilike(f'%{b}%'),
-        ))
-
-    if section:
-        sec = section.strip().upper()
-        q = q.filter(or_(
-            Session.section == None,
-            Session.section == '',
-            func.upper(Session.section) == sec,
-        ))
-
+    if branch:  q = q.filter(Session.branch  == branch)
+    if section: q = q.filter(Session.section == section)
     return q.all()
 
 

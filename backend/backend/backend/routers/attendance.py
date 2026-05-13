@@ -194,23 +194,8 @@ def export_session_attendance(
 
     # Get all students in this section/branch
     q = db.query(User).filter(User.role == UserRole.student, User.status == "active")
-    if session.branch:
-        # Use flexible branch matching to handle format differences
-        # e.g. "CSE(AI-ML-DL)" matches "B.Tech CSE (AI-ML-DL)"
-        from sqlalchemy import func
-        sb = session.branch.strip().lower()
-        # Extract core branch (remove degree prefix)
-        import re
-        sb_core = re.sub(r'^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', sb, flags=re.IGNORECASE).strip()
-        q = q.filter(
-            (func.lower(User.branch) == sb) |
-            (User.branch.ilike(f'%{sb_core}%')) |
-            (User.branch.ilike(f'%{sb}%')) |
-            (User.department.ilike(f'%{sb_core}%'))
-        )
-    if session.section: q = q.filter(
-        func.lower(User.section) == session.section.strip().lower()
-    )
+    if session.branch:  q = q.filter(User.branch  == session.branch)
+    if session.section: q = q.filter(User.section == session.section)
     students = q.order_by(User.full_name).all()
 
     # Get attendance records
@@ -562,22 +547,8 @@ def section_insights(
 ):
     """AI insights for an entire section — identify at-risk students."""
     q = db.query(User).filter(User.role == UserRole.student, User.status == "active")
-    if branch:
-        import re as _re
-        from sqlalchemy import func as _func, or_ as _or
-        b_raw  = branch.strip()
-        b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b_raw).strip()
-        q = q.filter(_or(
-            User.branch.ilike(b_raw),
-            User.branch.ilike(f'%{b_core}%'),
-            User.branch.ilike(f'%{b_raw}%'),
-            User.department.ilike(f'%{b_core}%'),
-        ))
-    if section:
-        from sqlalchemy import func as _func2, or_ as _or2
-        q = q.filter(_or2(
-            _func2.upper(User.section) == section.strip().upper(),
-        ))
+    if branch:  q = q.filter(User.branch  == branch)
+    if section: q = q.filter(User.section == section)
     students = q.all()
 
     total_sessions = db.query(Session).filter(

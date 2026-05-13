@@ -16,103 +16,23 @@ AdminOrFaculty = require_roles(UserRole.admin, UserRole.faculty)
 
 @router.get("", response_model=UserListOut)
 def list_users(
-    role: Optional[str]     = Query(None),
-    status_: Optional[str]  = Query(None, alias="status"),
-    search: Optional[str]   = Query(None),
-    branch: Optional[str]   = Query(None),
-    section: Optional[str]  = Query(None),
-    sub_section: Optional[str] = Query(None),
-    semester: Optional[str] = Query(None),
-    course: Optional[str]   = Query(None),        # e.g. "B.Tech", "MCA"
-    face_registered: Optional[bool] = Query(None),
-    sort_by: Optional[str]  = Query("created_at", regex="^(created_at|full_name|inst_id|branch|section|semester)$"),
-    sort_dir: Optional[str] = Query("desc", regex="^(asc|desc)$"),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=500),
-    _: User = Depends(AdminOrFaculty),
-    db: Session = Depends(get_db),
+    role: Optional[str] = Query(None), status_: Optional[str] = Query(None, alias="status"),
+    search: Optional[str] = Query(None), branch: Optional[str] = Query(None),
+    section: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
+    _: User = Depends(AdminOrFaculty), db: Session = Depends(get_db),
 ):
-    """
-    List users with comprehensive filters.
-    Accessible by Admin and Faculty (faculty sees students only).
-    """
     q = db.query(User)
-
-    # Role filter: faculty can only see students
-    caller = _
-    if caller.role == UserRole.faculty:
-        q = q.filter(User.role == UserRole.student)
-    elif role:
-        q = q.filter(User.role == role)
-
-    if status_:          q = q.filter(User.status == status_)
-    if branch:
-        # Flexible match: "CSE(AI-ML-DL)" matches "B.Tech - CSE (AI-ML-DL)" and vice versa
-        import re as _re
-        b_raw  = branch.strip()
-        b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc|b\.c\.a)[\s\-]+', '', b_raw).strip()
-        from sqlalchemy import func as _func, or_ as _or
-        q = q.filter(_or(
-            User.branch.ilike(b_raw),
-            User.branch.ilike(f'%{b_core}%'),
-            User.branch.ilike(f'%{b_raw}%'),
-            User.department.ilike(f'%{b_core}%'),
-        ))
-    if section:          q = q.filter(User.section == section)
-    if semester:         q = q.filter(User.semester == semester)
-    if course:           q = q.filter(User.course.ilike(course))
-    if face_registered is not None:
-        q = q.filter(User.face_registered == face_registered)
-
+    if role:    q = q.filter(User.role == role)
+    if status_: q = q.filter(User.status == status_)
+    if branch:  q = q.filter(User.branch == branch)
+    if section: q = q.filter(User.section == section)
     if search:
         like = f"%{search}%"
-        q = q.filter(
-            User.full_name.ilike(like) |
-            User.email.ilike(like)     |
-            User.inst_id.ilike(like)
-        )
-
-    # Sorting
-    sort_col = {
-        "created_at": User.created_at,
-        "full_name":  User.full_name,
-        "inst_id":    User.inst_id,
-        "branch":     User.branch,
-        "section":    User.section,
-        "semester":   User.semester,
-    }.get(sort_by, User.created_at)
-
-    if sort_dir == "asc":
-        q = q.order_by(sort_col.asc())
-    else:
-        q = q.order_by(sort_col.desc())
-
+        q = q.filter(User.full_name.ilike(like) | User.email.ilike(like) | User.inst_id.ilike(like))
     total = q.count()
-    users = q.offset(skip).limit(limit).all()
+    users = q.order_by(User.created_at.desc()).offset(skip).limit(limit).all()
     return {"total": total, "users": users}
-
-
-@router.get("/filter-options")
-def get_filter_options(
-    _: User = Depends(AdminOrFaculty),
-    db: Session = Depends(get_db),
-):
-    """
-    Returns distinct values for branch, section, semester, course
-    so the frontend can populate filter dropdowns dynamically.
-    """
-    students = db.query(User).filter(User.role == UserRole.student).all()
-
-    def distinct(field):
-        vals = sorted({getattr(u, field) for u in students if getattr(u, field)})
-        return vals
-
-    return {
-        "branches":  distinct("branch"),
-        "sections":  distinct("section"),
-        "semesters": distinct("semester"),
-        "courses":   distinct("course"),
-    }
 
 
 @router.post("", response_model=UserOut, status_code=201)

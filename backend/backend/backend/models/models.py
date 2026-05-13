@@ -54,7 +54,6 @@ class User(Base):
     section         = Column(String(20),  nullable=True)
     semester        = Column(String(20),  nullable=True)
     course          = Column(String(100), nullable=True)   # e.g. "B.Tech"
-    sub_section     = Column(String(20),  nullable=True)   # e.g. "A1", "A2" — lab batch  ← ADDED
     face_registered = Column(Boolean, default=False)
     face_embedding  = Column(Text, nullable=True)
     face_image_b64  = Column(Text, nullable=True)
