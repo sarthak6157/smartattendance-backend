@@ -347,10 +347,16 @@ def export_student_attendance(
         .filter(AttendanceRecord.student_id == student_id)\
         .order_by(AttendanceRecord.marked_at.desc()).all()
 
+    # Load sessions + courses in bulk — fixes N+1 query
+    _sess_ids = list({r.session_id for r in records})
+    _sessions_map = {s.id: s for s in db.query(Session).filter(Session.id.in_(_sess_ids)).all()} if _sess_ids else {}
+    _course_ids = list({s.course_id for s in _sessions_map.values()})
+    _courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(_course_ids)).all()} if _course_ids else {}
+
     rows = []
     for i, rec in enumerate(records, 1):
-        sess   = db.query(Session).filter(Session.id == rec.session_id).first()
-        course = db.query(Course).filter(Course.id == sess.course_id).first() if sess else None
+        sess   = _sessions_map.get(rec.session_id)
+        course = _courses_map.get(sess.course_id) if sess else None
         rows.append({
             "S.No":       i,
             "Date":       rec.marked_at.strftime("%d-%b-%Y") if rec.marked_at else "-",
@@ -454,11 +460,26 @@ def student_insights(
         .filter(AttendanceRecord.student_id == student_id).all()
 
     sessions_attended = [r for r in records if r.status.value == "present"]
-    total_sessions    = db.query(Session).filter(
-        Session.branch  == student.branch,
-        Session.section == student.section,
-        Session.status  == "closed"
-    ).count()
+    # Count only sessions relevant to THIS student (matching branch+section)
+    from sqlalchemy import or_ as _or2, func as _func2
+    import re as _re2
+    b = (student.branch or '').strip()
+    b_core = _re2.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b).strip()
+    sess_q = db.query(Session).filter(Session.status == "closed")
+    if b:
+        sess_q = sess_q.filter(_or2(
+            Session.branch == None,
+            Session.branch == '',
+            Session.branch.ilike(b),
+            Session.branch.ilike(f'%{b_core}%'),
+        ))
+    if student.section:
+        sess_q = sess_q.filter(_or2(
+            Session.section == None,
+            Session.section == '',
+            _func2.upper(Session.section) == student.section.strip().upper(),
+        ))
+    total_sessions = sess_q.count()
 
     present_count = len(sessions_attended)
     pct = round((present_count / total_sessions) * 100) if total_sessions else 0
@@ -476,11 +497,17 @@ def student_insights(
             x += 1
             if x > 200: needed = -1; break
 
-    # Day-wise analysis
+    # Load all sessions + courses in ONE query — fixes N+1 problem
     from collections import defaultdict
+    session_ids = list({r.session_id for r in records})
+    all_sessions = {s.id: s for s in db.query(Session).filter(Session.id.in_(session_ids)).all()} if session_ids else {}
+    course_ids_needed = list({s.course_id for s in all_sessions.values()})
+    all_courses = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids_needed)).all()} if course_ids_needed else {}
+
+    # Day-wise analysis
     day_stats = defaultdict(lambda: {"present": 0, "total": 0})
     for rec in records:
-        sess = db.query(Session).filter(Session.id == rec.session_id).first()
+        sess = all_sessions.get(rec.session_id)
         if sess and sess.scheduled_at:
             day = sess.scheduled_at.strftime("%A")
             day_stats[day]["total"] += 1
@@ -499,9 +526,9 @@ def student_insights(
     # Course-wise breakdown
     course_stats = defaultdict(lambda: {"present": 0, "total": 0, "name": ""})
     for rec in records:
-        sess = db.query(Session).filter(Session.id == rec.session_id).first()
+        sess = all_sessions.get(rec.session_id)
         if sess:
-            course = db.query(Course).filter(Course.id == sess.course_id).first()
+            course = all_courses.get(sess.course_id)
             cname = course.name if course else f"Course {sess.course_id}"
             course_stats[sess.course_id]["name"] = cname
             course_stats[sess.course_id]["total"] += 1

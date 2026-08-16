@@ -311,3 +311,107 @@ def download_template(_: User = Depends(AdminOnly)):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=student_import_template.csv"}
     )
+
+
+# ── Bulk Promote / Semester Change ─────────────────────────────────────────────
+from pydantic import BaseModel as _BM
+
+class PromoteRequest(_BM):
+    from_branch:   str
+    from_section:  str
+    from_semester: str
+    to_semester:   str
+    to_section:    Optional[str] = None   # optional: change section too
+    to_branch:     Optional[str] = None   # optional: change branch too
+
+class PromoteOneRequest(_BM):
+    semester:    Optional[str] = None
+    section:     Optional[str] = None
+    branch:      Optional[str] = None
+    sub_section: Optional[str] = None
+    course:      Optional[str] = None
+
+@router.post("/promote/bulk")
+def bulk_promote(
+    payload: PromoteRequest,
+    _: User = Depends(AdminOnly),
+    db: Session = Depends(get_db),
+):
+    """
+    Bulk promote students to next semester.
+    Example: move all Section C 2nd sem → 3rd sem
+    """
+    from sqlalchemy import func as _func
+    q = db.query(User).filter(
+        User.role    == UserRole.student,
+        User.status  == UserStatus.active,
+        _func.lower(User.section)  == payload.from_section.strip().lower(),
+        _func.lower(User.semester) == payload.from_semester.strip().lower(),
+    )
+    # Flexible branch match
+    import re as _re
+    b_raw  = payload.from_branch.strip()
+    b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b_raw).strip()
+    from sqlalchemy import or_ as _or
+    q = q.filter(_or(
+        User.branch.ilike(b_raw),
+        User.branch.ilike(f'%{b_core}%'),
+    ))
+    students = q.all()
+    if not students:
+        return {"promoted": 0, "message": "No students found matching the criteria."}
+
+    for stu in students:
+        stu.semester = payload.to_semester
+        if payload.to_section: stu.section = payload.to_section
+        if payload.to_branch:  stu.branch  = payload.to_branch; stu.department = payload.to_branch
+        stu.updated_at = datetime.utcnow()
+
+    db.commit()
+    return {
+        "promoted":  len(students),
+        "message":   f"Successfully promoted {len(students)} students to {payload.to_semester}",
+        "students":  [{"id": s.id, "name": s.full_name, "inst_id": s.inst_id} for s in students],
+    }
+
+
+@router.post("/{user_id}/promote")
+def promote_one_student(
+    user_id: int,
+    payload: PromoteOneRequest,
+    _: User = Depends(AdminOnly),
+    db: Session = Depends(get_db),
+):
+    """Promote or update a single student's academic details."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user: raise HTTPException(status_code=404, detail="Student not found.")
+    if user.role != UserRole.student:
+        raise HTTPException(status_code=400, detail="User is not a student.")
+
+    if payload.semester:    user.semester    = payload.semester
+    if payload.section:     user.section     = payload.section
+    if payload.branch:      user.branch      = payload.branch; user.department = payload.branch
+    if payload.sub_section: user.sub_section = payload.sub_section
+    if payload.course:      user.course      = payload.course
+    user.updated_at = datetime.utcnow()
+    db.commit(); db.refresh(user)
+    return {"message": f"Student {user.full_name} updated successfully.", "user": {
+        "id": user.id, "name": user.full_name, "semester": user.semester,
+        "section": user.section, "branch": user.branch,
+    }}
+
+
+@router.get("/promote/options")
+def get_promote_options(
+    _: User = Depends(AdminOnly),
+    db: Session = Depends(get_db),
+):
+    """Get all unique branch/section/semester combos for the promote form."""
+    students = db.query(User).filter(
+        User.role == UserRole.student,
+        User.status == UserStatus.active
+    ).all()
+    branches  = sorted({s.branch   or '' for s in students if s.branch})
+    sections  = sorted({s.section  or '' for s in students if s.section})
+    semesters = sorted({s.semester or '' for s in students if s.semester})
+    return {"branches": branches, "sections": sections, "semesters": semesters}

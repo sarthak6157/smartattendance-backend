@@ -109,3 +109,30 @@ def change_password(
     current_user.updated_at = datetime.utcnow()
     db.commit()
     return {"message": "Password updated successfully."}
+
+
+# ── Admin: Reset any user's password ─────────────────────────────────────────
+from pydantic import BaseModel as _AuthBM
+from core.security import require_roles as _req
+from models.models import UserRole as _UR
+
+class AdminResetPwd(_AuthBM):
+    new_password: str
+
+@router.post("/admin/reset-password/{user_id}", status_code=200)
+def admin_reset_password(
+    user_id: int,
+    payload: AdminResetPwd,
+    current_admin: User = Depends(_req(_UR.admin)),
+    db: Session = Depends(get_db),
+):
+    """Admin resets any user's password."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if len(payload.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+    user.hashed_password = hash_password(payload.new_password)
+    user.updated_at      = datetime.utcnow()
+    db.commit()
+    return {"message": f"Password reset successfully for {user.full_name}."}

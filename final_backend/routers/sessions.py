@@ -85,6 +85,37 @@ def get_active(
             func.upper(Session.section) == sec,
         ))
 
+    # Also only return sessions that are for this specific section
+    # (not sessions from other classes accidentally leaking through)
+    results = q.all()
+    return results
+
+
+@router.get("/active/mine", response_model=list[SessionOut])
+def get_my_active_sessions(
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    """Get active sessions specifically for the logged-in student's class."""
+    from sqlalchemy import func, or_
+    import re
+    q = db.query(Session).filter(Session.status == SessionStatus.active)
+    branch  = current_user.branch or current_user.department or ''
+    section = current_user.section or ''
+    if branch:
+        b = branch.strip().lower()
+        b_core = re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b).strip()
+        q = q.filter(or_(
+            Session.branch == None, Session.branch == '',
+            func.lower(Session.branch) == b,
+            Session.branch.ilike(f'%{b_core}%'),
+        ))
+    if section:
+        sec = section.strip().upper()
+        q = q.filter(or_(
+            Session.section == None, Session.section == '',
+            func.upper(Session.section) == sec,
+        ))
     return q.all()
 
 
@@ -171,3 +202,48 @@ def create_extra_class(
     )
     db.add(s); db.commit(); db.refresh(s)
     return s
+
+
+# ── Admin Session Management ───────────────────────────────────────────────────
+@router.post("/admin/end-all-stuck")
+def end_all_stuck_sessions(
+    _: User = Depends(require_roles(UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    """End all sessions that have been live for more than 4 hours (stuck sessions)."""
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(hours=4)
+    stuck = db.query(Session).filter(
+        Session.status     == SessionStatus.active,
+        Session.started_at <= cutoff,
+    ).all()
+    for s in stuck:
+        s.status   = SessionStatus.closed
+        s.ended_at = datetime.utcnow()
+        s.qr_token = None
+    db.commit()
+    return {"ended": len(stuck), "message": f"Ended {len(stuck)} stuck sessions."}
+
+
+@router.get("/admin/stats")
+def admin_session_stats(
+    branch:  Optional[str] = None,
+    section: Optional[str] = None,
+    _: User = Depends(require_roles(UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    """Admin overview of sessions — total, active, closed."""
+    from models.models import AttendanceRecord
+    q = db.query(Session)
+    if branch:  q = q.filter(Session.branch.ilike(f'%{branch}%'))
+    if section: q = q.filter(Session.section == section)
+    total  = q.count()
+    active = q.filter(Session.status == SessionStatus.active).count()
+    closed = q.filter(Session.status == SessionStatus.closed).count()
+    total_att = db.query(AttendanceRecord).count()
+    return {
+        "total_sessions":    total,
+        "active_sessions":   active,
+        "closed_sessions":   closed,
+        "total_attendance":  total_att,
+    }
