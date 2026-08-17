@@ -41,7 +41,8 @@ class DayOfWeek(str, enum.Enum):
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__  = "users"
+    __table_args__ = {"schema": "public"}  # Explicitly use public schema — prevents collision with auth.users
     id              = Column(Integer, primary_key=True, index=True)
     full_name       = Column(String(120), nullable=False)
     inst_id         = Column(String(50), unique=True, nullable=False, index=True)
@@ -69,7 +70,8 @@ class User(Base):
 
 
 class Course(Base):
-    __tablename__ = "courses"
+    __tablename__  = "courses"
+    __table_args__ = {"schema": "public"}
     id         = Column(Integer, primary_key=True, index=True)
     code       = Column(String(20), unique=True, nullable=False)
     name       = Column(String(150), nullable=False)
@@ -86,7 +88,8 @@ class Course(Base):
 
 class TimetableSlot(Base):
     """A recurring weekly class slot — created by admin."""
-    __tablename__ = "timetable_slots"
+    __tablename__  = "timetable_slots"
+    __table_args__ = {"schema": "public"}
     id          = Column(Integer, primary_key=True, index=True)
     course_id   = Column(Integer, ForeignKey("courses.id"), nullable=False)
     faculty_id  = Column(Integer, ForeignKey("users.id"),   nullable=False)
@@ -108,7 +111,8 @@ class TimetableSlot(Base):
 
 class Session(Base):
     """A live attendance session — created from a timetable slot."""
-    __tablename__ = "sessions"
+    __tablename__  = "sessions"
+    __table_args__ = {"schema": "public"}
     id            = Column(Integer, primary_key=True, index=True)
     course_id     = Column(Integer, ForeignKey("courses.id"), nullable=False)
     faculty_id    = Column(Integer, ForeignKey("users.id"),   nullable=False)
@@ -137,8 +141,11 @@ class Session(Base):
 
 
 class AttendanceRecord(Base):
-    __tablename__ = "attendance_records"
-    __table_args__ = (UniqueConstraint("session_id", "student_id", name="uq_session_student"),)
+    __tablename__  = "attendance_records"
+    __table_args__ = (
+        UniqueConstraint("session_id", "student_id", name="uq_session_student"),
+        {"schema": "public"}
+    )
     id          = Column(Integer, primary_key=True, index=True)
     session_id  = Column(Integer, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
     student_id  = Column(Integer, ForeignKey("users.id"),   nullable=False)
@@ -154,7 +161,8 @@ class AttendanceRecord(Base):
 
 
 class SystemSettings(Base):
-    __tablename__ = "system_settings"
+    __tablename__  = "system_settings"
+    __table_args__ = {"schema": "public"}
     id            = Column(Integer, primary_key=True, default=1)
     gps_range     = Column(Integer, default=50)
     face_required = Column(Boolean, default=True)

@@ -53,16 +53,18 @@ class UserOut(BaseModel):
     email: str
     role: UserRole
     status: UserStatus
-    department: Optional[str]
-    branch: Optional[str]
-    section: Optional[str]
-    semester: Optional[str]
+    department: Optional[str] = None
+    branch:     Optional[str] = None
+    section:    Optional[str] = None
+    sub_section:Optional[str] = None   # lab batch e.g. A1, A2
+    semester:   Optional[str] = None
+    course:     Optional[str] = None   # degree type e.g. B.Tech
     face_registered: bool = False
-    face_embedding:  Optional[str] = None   # 128-float JSON array for client-side matching
+    face_embedding:  Optional[str] = None
     created_at: datetime
-    last_login: Optional[datetime]
-    class Config:
-        from_attributes = True
+    last_login: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    model_config = {"from_attributes": True, "use_enum_values": True}
 
 class UserListOut(BaseModel):
     total: int
@@ -86,8 +88,7 @@ class CourseOut(BaseModel):
     section:    Optional[str]
     semester:   Optional[str]
     credits: int
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True, "use_enum_values": True}
 
 class SessionCreate(BaseModel):
     course_id: int
@@ -102,21 +103,23 @@ class SessionOut(BaseModel):
     id: int
     course_id: int
     faculty_id: int
-    title: Optional[str]
-    qr_token: Optional[str]
-    location: Optional[str]
-    branch:   Optional[str]
-    section:  Optional[str]
-    gps_lat: Optional[str]
-    gps_lng: Optional[str]
+    timetable_id: Optional[int] = None
+    title: Optional[str] = None
+    qr_token: Optional[str] = None
+    location: Optional[str] = None
+    branch:      Optional[str] = None
+    section:     Optional[str] = None
+    sub_section: Optional[str] = None
+    semester:    Optional[str] = None
+    gps_lat: Optional[str] = None
+    gps_lng: Optional[str] = None
     status: SessionStatus
     scheduled_at: datetime
-    started_at: Optional[datetime]
-    ended_at: Optional[datetime]
-    grace_minutes: int
+    started_at:  Optional[datetime] = None
+    ended_at:    Optional[datetime] = None
+    grace_minutes: int = 15
     created_at: datetime
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True, "use_enum_values": True}
 
 class SessionListOut(BaseModel):
     total: int
@@ -141,8 +144,7 @@ class AttendanceOut(BaseModel):
     status: AttendanceStatus
     marked_at: datetime
     notes: Optional[str]
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True, "use_enum_values": True}
 
 class AttendanceListOut(BaseModel):
     total: int
@@ -153,8 +155,7 @@ class SettingsOut(BaseModel):
     face_required: bool
     qr_expiry: int
     inst_name: str
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True, "use_enum_values": True}
 
 class SettingsUpdate(BaseModel):
     gps_range:     Optional[int]  = None

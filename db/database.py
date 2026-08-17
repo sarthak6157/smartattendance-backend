@@ -47,6 +47,18 @@ def create_db_engine():
             )
 
 engine = create_db_engine()
+
+# Set search_path to public schema — prevents collision with Supabase's auth.users table
+from sqlalchemy import event
+@event.listens_for(engine, "connect")
+def set_search_path(dbapi_connection, connection_record):
+    try:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("SET search_path TO public")
+        cursor.close()
+    except Exception:
+        pass
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
