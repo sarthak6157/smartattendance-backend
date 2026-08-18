@@ -1,22 +1,34 @@
-"""Timetable routes — admin creates slots, faculty goes live."""
+"""Timetable routes — visual grid builder, copy, conflict detection."""
+import re
 from datetime import datetime
-import secrets
-from typing import Optional, List
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as DBSession
 
 from core.security import get_current_user, require_roles
 from db.database import get_db
-from models.models import TimetableSlot, Session, SessionStatus, User, UserRole, Course, DayOfWeek
-from pydantic import BaseModel
+from models.models import (TimetableSlot, Session, SessionStatus,
+                           User, UserRole, Course, DayOfWeek)
 
-router = APIRouter()
-AdminOnly      = require_roles(UserRole.admin)
-FacultyOrAdmin = require_roles(UserRole.faculty, UserRole.admin)
+router    = APIRouter()
+AdminOnly = require_roles(UserRole.admin)
 
+DAYS = ["monday","tuesday","wednesday","thursday","friday","saturday"]
 
-# ── Schemas ──────────────────────────────────────────────────────────────────
+# Default time slots
+DEFAULT_SLOTS = [
+    "09:10-09:25",
+    "09:30-10:30",
+    "10:30-11:25",
+    "11:30-12:25",
+    "12:30-13:25",
+    "14:25-15:10",
+    "15:10-15:55",
+]
 
+# ── Pydantic schemas ──────────────────────────────────────────────────────────
 class SlotCreate(BaseModel):
     course_id:   int
     faculty_id:  int
@@ -26,70 +38,62 @@ class SlotCreate(BaseModel):
     room:        Optional[str] = None
     branch:      Optional[str] = None
     section:     Optional[str] = None
-    sub_section: Optional[str] = None   # e.g. "A1","A2" — only for labs
+    sub_section: Optional[str] = None
     semester:    Optional[str] = None
     course_type: Optional[str] = None
 
 class SlotOut(BaseModel):
-    id:          int
-    course_id:   int
-    faculty_id:  int
-    day_of_week: str
-    start_time:  str
-    end_time:    str
-    room:        Optional[str]
-    branch:      Optional[str]
-    section:     Optional[str]
-    sub_section: Optional[str] = None
-    semester:    Optional[str]
-    course_type: Optional[str]
-    is_active:   bool
-    course_name: Optional[str] = None
-    faculty_name:Optional[str] = None
-
-    model_config = {"from_attributes": True, "use_enum_values": True}
-
-    def model_post_init(self, __context):
-        # Ensure day_of_week is always a plain string not enum object
-        if hasattr(self.day_of_week, 'value'):
-            object.__setattr__(self, 'day_of_week', self.day_of_week.value)
+    id:           int
+    course_id:    int
+    faculty_id:   int
+    day_of_week:  str
+    start_time:   str
+    end_time:     str
+    room:         Optional[str] = None
+    branch:       Optional[str] = None
+    section:      Optional[str] = None
+    sub_section:  Optional[str] = None
+    semester:     Optional[str] = None
+    course_type:  Optional[str] = None
+    is_active:    bool
+    course_name:  Optional[str] = None
+    course_code:  Optional[str] = None
+    faculty_name: Optional[str] = None
+    model_config  = {"from_attributes": True, "use_enum_values": True}
 
 class GoLiveRequest(BaseModel):
     gps_lat: Optional[str] = None
     gps_lng: Optional[str] = None
 
-
-# ── Endpoints ─────────────────────────────────────────────────────────────────
-
-# ⚠️ /debug/student-match MUST be before /{slot_id} routes to avoid 404
-
-@router.get("/debug/student-match")
-def debug_student_match(
-    current_user: User = Depends(get_current_user),
-    db: DBSession = Depends(get_db),
-):
-    from sqlalchemy import distinct
-    all_branches = db.query(distinct(TimetableSlot.branch)).all()
-    all_sections = db.query(distinct(TimetableSlot.section)).all()
-    return {
-        "student_branch":      current_user.branch,
-        "student_department":  current_user.department,
-        "student_section":     current_user.section,
-        "student_sub_section": current_user.sub_section,   # ← FIXED: was current_user.course
-        "timetable_branches":  [r[0] for r in all_branches],
-        "timetable_sections":  [r[0] for r in all_sections],
-    }
+class CopyTimetableRequest(BaseModel):
+    from_branch:   str
+    from_section:  str
+    from_semester: str
+    to_branch:     str
+    to_section:    str
+    to_semester:   str
+    copy_teachers: bool = False  # if False, teachers = unassigned (faculty_id=1)
 
 
-@router.get("", response_model=List[SlotOut])
+# ── Helper: extract core branch for fuzzy match ───────────────────────────────
+def extract_core(branch_str: str) -> str:
+    if not branch_str: return ""
+    s = branch_str.strip().lower()
+    for p in ["b.tech - ","b.tech-","b.tech ","btech ","b.e - ","b.e ","m.tech - ","m.tech "]:
+        if s.startswith(p): s = s[len(p):]; break
+    return re.sub(r"[\s\-_]+", " ", s).strip()
+
+
+# ── List slots ────────────────────────────────────────────────────────────────
+@router.get("", response_model=list[SlotOut])
 def list_slots(
     branch:     Optional[str] = Query(None),
     section:    Optional[str] = Query(None),
+    semester:   Optional[str] = Query(None),
     faculty_id: Optional[int] = Query(None),
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    from sqlalchemy import func, or_
     q = db.query(TimetableSlot).filter(TimetableSlot.is_active == True)
 
     if current_user.role == UserRole.faculty:
@@ -97,133 +101,120 @@ def list_slots(
     elif faculty_id:
         q = q.filter(TimetableSlot.faculty_id == faculty_id)
 
-    # For students: auto-inject their branch/section/sub_section
     if current_user.role == UserRole.student:
-        effective_branch     = branch   or current_user.branch or current_user.department
-        effective_section    = section  or current_user.section
-        # ── FIX: read sub_section directly from the users table ──────────────
-        # Previously this was reading current_user.course (which holds "B.Tech")
-        # and trying to guess if it was a lab batch — that was always wrong.
-        # Now we read current_user.sub_section which is the actual DB column.
-        effective_subsection = (current_user.sub_section or "").strip() or None
+        effective_branch   = branch  or current_user.branch or current_user.department
+        effective_section  = section or current_user.section
+        raw_subsec = current_user.course or ""
+        effective_subsection = raw_subsec.strip() if (
+            len(raw_subsec.strip()) <= 4 and
+            raw_subsec.strip() not in ["B.Tech","B.E","BCA","MCA","MBA","M.Tech","B.Sc"]
+        ) else None
     else:
         effective_branch     = branch
         effective_section    = section
         effective_subsection = None
 
-    # ── Branch Matching ───────────────────────────────────────────────────────
-    # Problem: slot branch = "CSE(AI-ML-DL)" but user branch = "CSE (AI-ML-DL)"
-    # Solution: extract CORE keywords and match loosely
-
-    def extract_core(branch_str):
-        """Remove degree prefix and normalize branch string."""
-        import re
-        if not branch_str:
-            return ""
-        s = branch_str.strip().lower()
-        prefixes = [
-            'b.tech - ', 'b.tech-', 'b.tech ', 'btech ',
-            'b.e - ', 'b.e-', 'b.e ',
-            'm.tech - ', 'm.tech-', 'm.tech ',
-            'bca - ', 'bca-', 'bca ',
-            'mca - ', 'mca-', 'mca ',
-            'mba - ', 'mba-', 'mba ',
-            'b.sc - ', 'b.sc-', 'b.sc ',
-            'b.pharma - ', 'b.pharma ',
-        ]
-        for p in prefixes:
-            if s.startswith(p):
-                s = s[len(p):]
-                break
-        s = re.sub(r'[\s\-_]+', ' ', s).strip()
-        return s
-
     if effective_branch:
-        eb = effective_branch.strip().lower()
+        eb      = effective_branch.strip().lower()
         eb_core = extract_core(eb)
-        eb_short = eb_core.split('(')[0].strip() if eb_core else ''
-
-        if current_user.role == UserRole.student:
-            conditions = [
-                TimetableSlot.branch == None,
-                TimetableSlot.branch == '',
-                func.lower(TimetableSlot.branch) == eb,
-                TimetableSlot.branch.ilike(f'%{eb}%'),
-                TimetableSlot.branch.ilike(f'%{eb}%'),
-            ]
-            if eb_core:
-                conditions.append(TimetableSlot.branch.ilike(f'%{eb_core}%'))
-            if eb_short:
-                conditions.append(TimetableSlot.branch.ilike(f'%{eb_short}%'))
-            q = q.filter(or_(*conditions))
-        else:
-            q = q.filter(
-                or_(
-                    func.lower(TimetableSlot.branch) == eb,
-                    TimetableSlot.branch.ilike(f'%{eb}%'),
-                    TimetableSlot.branch.ilike(f'%{eb}%'),
-                )
-            )
-
-    # ── Section + Sub-section Filter ─────────────────────────────────────────
-    #
-    # How lab slots work in your timetable_slots table:
-    #   Theory slots → section = "A",  sub_section = NULL
-    #   Lab slots    → section = "A1", sub_section = NULL   (section IS the batch)
-    #
-    # A student with section="A" and sub_section="A1" should see:
-    #   - All theory slots where slot.section = "A"
-    #   - Their lab slots where slot.section = "A1"
-    #
-    # So the query becomes:
-    #   slot.section = student.section   (catches theory)
-    #   OR slot.section = student.sub_section  (catches labs)
+        eb_short = eb_core.split("(")[0].strip() if eb_core else ""
+        conditions = [
+            TimetableSlot.branch == None,
+            TimetableSlot.branch == "",
+            func.lower(TimetableSlot.branch) == eb,
+            func.strpos(func.lower(TimetableSlot.branch), eb) > 0,
+            func.strpos(eb, func.lower(TimetableSlot.branch)) > 0,
+        ]
+        if eb_core:  conditions.append(func.strpos(func.lower(TimetableSlot.branch), eb_core) > 0)
+        if eb_short: conditions.append(func.strpos(func.lower(TimetableSlot.branch), eb_short) > 0)
+        q = q.filter(or_(*conditions))
 
     if effective_section:
         sec = effective_section.strip().upper()
-
-        if current_user.role == UserRole.student:
-            if effective_subsection:
-                subsec = effective_subsection.strip().upper()
-                from sqlalchemy import and_, or_
-                # Student sees: theory (section=A) OR their lab batch (section=A1)
-                q = q.filter(
-                    or_(
-                        func.upper(TimetableSlot.section) == sec,        # theory rows
-                        func.upper(TimetableSlot.section) == subsec,     # lab rows
-                    )
+        if current_user.role == UserRole.student and effective_subsection:
+            subsec = effective_subsection.strip().upper()
+            q = q.filter(
+                func.lower(TimetableSlot.section) == sec.lower(),
+                or_(
+                    TimetableSlot.sub_section == None,
+                    func.lower(TimetableSlot.sub_section) == subsec.lower()
                 )
-            else:
-                # No sub_section assigned — only show main section slots
-                q = q.filter(
-                    or_(
-                        TimetableSlot.section == None,
-                        func.upper(TimetableSlot.section) == sec,
-                    )
-                )
+            )
         else:
             q = q.filter(func.lower(TimetableSlot.section) == sec.lower())
 
+    if semester:
+        q = q.filter(func.lower(TimetableSlot.semester) == semester.strip().lower())
+
     slots = q.order_by(TimetableSlot.day_of_week, TimetableSlot.start_time).all()
-    if not slots:
-        return []
-    # Load all courses and faculty in ONE query each — fixes N+1 query problem
+    if not slots: return []
+
+    # Bulk load courses and faculty
     course_ids  = list({s.course_id  for s in slots})
     faculty_ids = list({s.faculty_id for s in slots})
     courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
     faculty_map = {f.id: f for f in db.query(User).filter(User.id.in_(faculty_ids)).all()}
+
     result = []
     for s in slots:
         co  = courses_map.get(s.course_id)
         fac = faculty_map.get(s.faculty_id)
-        d = SlotOut.model_validate(s)
+        d   = SlotOut.model_validate(s)
         d.day_of_week  = s.day_of_week.value if hasattr(s.day_of_week, "value") else str(s.day_of_week)
         d.course_name  = co.name       if co  else None
+        d.course_code  = co.code       if co  else None
         d.faculty_name = fac.full_name if fac else None
         result.append(d)
     return result
 
 
+# ── Get grid data for visual timetable builder ────────────────────────────────
+@router.get("/grid")
+def get_timetable_grid(
+    branch:   str = Query(...),
+    section:  str = Query(...),
+    semester: str = Query(...),
+    _: User = Depends(require_roles(UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    """
+    Returns timetable as a grid dict:
+    { "monday": { "09:30-10:30": { slot_data }, ... }, ... }
+    Used by the visual timetable builder.
+    """
+    slots = db.query(TimetableSlot).filter(
+        TimetableSlot.is_active == True,
+        func.lower(TimetableSlot.branch)   == branch.strip().lower(),
+        func.lower(TimetableSlot.section)  == section.strip().lower(),
+        func.lower(TimetableSlot.semester) == semester.strip().lower(),
+    ).all()
+
+    course_ids  = list({s.course_id  for s in slots})
+    faculty_ids = list({s.faculty_id for s in slots})
+    courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()} if course_ids else {}
+    faculty_map = {f.id: f for f in db.query(User).filter(User.id.in_(faculty_ids)).all()} if faculty_ids else {}
+
+    grid = {day: {} for day in DAYS}
+    for s in slots:
+        day = s.day_of_week.value if hasattr(s.day_of_week, "value") else str(s.day_of_week)
+        time_key = f"{s.start_time}-{s.end_time}"
+        co  = courses_map.get(s.course_id)
+        fac = faculty_map.get(s.faculty_id)
+        grid[day][time_key] = {
+            "id":           s.id,
+            "course_id":    s.course_id,
+            "course_name":  co.name  if co  else "?",
+            "course_code":  co.code  if co  else "?",
+            "course_type":  s.course_type or (co.course_type if co else "theory"),
+            "faculty_id":   s.faculty_id,
+            "faculty_name": fac.full_name if fac else "Unassigned",
+            "room":         s.room,
+            "sub_section":  s.sub_section,
+        }
+    return {"grid": grid, "time_slots": DEFAULT_SLOTS, "days": DAYS}
+
+
+# ── Create slot ───────────────────────────────────────────────────────────────
 @router.post("", response_model=SlotOut, status_code=201)
 def create_slot(
     payload: SlotCreate,
@@ -235,83 +226,214 @@ def create_slot(
     if not co:  raise HTTPException(status_code=404, detail="Course not found.")
     if not fac: raise HTTPException(status_code=404, detail="Faculty not found.")
 
-    # Normalize day_of_week to lowercase to match DB enum
     data = payload.model_dump()
-    data['day_of_week'] = data['day_of_week'].strip().lower()
+    data["day_of_week"] = data["day_of_week"].strip().lower()
 
     slot = TimetableSlot(**data)
     db.add(slot); db.commit(); db.refresh(slot)
     d = SlotOut.model_validate(slot)
-    d.course_name = co.name; d.faculty_name = fac.full_name
+    d.day_of_week  = slot.day_of_week.value if hasattr(slot.day_of_week, "value") else str(slot.day_of_week)
+    d.course_name  = co.name
+    d.course_code  = co.code
+    d.faculty_name = fac.full_name
     return d
 
 
+# ── Update slot ───────────────────────────────────────────────────────────────
+@router.patch("/{slot_id}", response_model=SlotOut)
+def update_slot(
+    slot_id: int,
+    payload: SlotCreate,
+    _: User = Depends(AdminOnly),
+    db: DBSession = Depends(get_db),
+):
+    slot = db.query(TimetableSlot).filter(TimetableSlot.id == slot_id).first()
+    if not slot: raise HTTPException(status_code=404, detail="Slot not found.")
+    co  = db.query(Course).filter(Course.id == payload.course_id).first()
+    fac = db.query(User).filter(User.id == payload.faculty_id).first()
+    if not co:  raise HTTPException(status_code=404, detail="Course not found.")
+    if not fac: raise HTTPException(status_code=404, detail="Faculty not found.")
+
+    for k, v in payload.model_dump().items():
+        if k == "day_of_week": v = v.strip().lower()
+        setattr(slot, k, v)
+    db.commit(); db.refresh(slot)
+
+    d = SlotOut.model_validate(slot)
+    d.day_of_week  = slot.day_of_week.value if hasattr(slot.day_of_week, "value") else str(slot.day_of_week)
+    d.course_name  = co.name
+    d.course_code  = co.code
+    d.faculty_name = fac.full_name
+    return d
+
+
+# ── Delete slot ───────────────────────────────────────────────────────────────
 @router.delete("/{slot_id}", status_code=204)
 def delete_slot(slot_id: int, _: User = Depends(AdminOnly), db: DBSession = Depends(get_db)):
     slot = db.query(TimetableSlot).filter(TimetableSlot.id == slot_id).first()
-    if not slot: raise HTTPException(status_code=404)
+    if not slot: raise HTTPException(status_code=404, detail="Slot not found.")
     db.delete(slot); db.commit()
 
 
+# ── Copy timetable ────────────────────────────────────────────────────────────
+@router.post("/copy")
+def copy_timetable(
+    payload: CopyTimetableRequest,
+    _: User = Depends(AdminOnly),
+    db: DBSession = Depends(get_db),
+):
+    """Copy all slots from one section to another. Optionally copy teachers."""
+    slots = db.query(TimetableSlot).filter(
+        TimetableSlot.is_active == True,
+        func.lower(TimetableSlot.branch)   == payload.from_branch.strip().lower(),
+        func.lower(TimetableSlot.section)  == payload.from_section.strip().lower(),
+        func.lower(TimetableSlot.semester) == payload.from_semester.strip().lower(),
+    ).all()
+
+    if not slots:
+        raise HTTPException(status_code=404, detail="No slots found for source section.")
+
+    # Delete existing slots in destination if any
+    db.query(TimetableSlot).filter(
+        TimetableSlot.is_active == True,
+        func.lower(TimetableSlot.branch)   == payload.to_branch.strip().lower(),
+        func.lower(TimetableSlot.section)  == payload.to_section.strip().lower(),
+        func.lower(TimetableSlot.semester) == payload.to_semester.strip().lower(),
+    ).delete(synchronize_session=False)
+
+    # Admin user id=1 as placeholder for unassigned
+    admin = db.query(User).filter(User.role == UserRole.admin).first()
+    placeholder_id = admin.id if admin else 1
+
+    new_slots = []
+    for s in slots:
+        new_slot = TimetableSlot(
+            course_id   = s.course_id,
+            faculty_id  = s.faculty_id if payload.copy_teachers else placeholder_id,
+            day_of_week = s.day_of_week,
+            start_time  = s.start_time,
+            end_time    = s.end_time,
+            room        = s.room,
+            branch      = payload.to_branch,
+            section     = payload.to_section,
+            sub_section = s.sub_section,
+            semester    = payload.to_semester,
+            course_type = s.course_type,
+            is_active   = True,
+        )
+        db.add(new_slot)
+        new_slots.append(new_slot)
+
+    db.commit()
+    return {
+        "copied":  len(new_slots),
+        "message": f"Copied {len(new_slots)} slots to {payload.to_branch} Section {payload.to_section}.",
+        "note":    "Teachers are unassigned — please assign them in the timetable editor." if not payload.copy_teachers else "Teachers copied from source section.",
+    }
+
+
+# ── Conflict check ────────────────────────────────────────────────────────────
+@router.get("/conflicts")
+def check_conflicts(
+    branch:   Optional[str] = None,
+    section:  Optional[str] = None,
+    semester: Optional[str] = None,
+    _: User = Depends(AdminOnly),
+    db: DBSession = Depends(get_db),
+):
+    """Check for teacher conflicts — same teacher at same time in different places."""
+    q = db.query(TimetableSlot).filter(TimetableSlot.is_active == True)
+    if branch:   q = q.filter(func.lower(TimetableSlot.branch)   == branch.strip().lower())
+    if section:  q = q.filter(func.lower(TimetableSlot.section)  == section.strip().lower())
+    if semester: q = q.filter(func.lower(TimetableSlot.semester) == semester.strip().lower())
+    slots = q.all()
+
+    faculty_ids = list({s.faculty_id for s in slots})
+    faculty_map = {f.id: f for f in db.query(User).filter(User.id.in_(faculty_ids)).all()}
+    course_ids  = list({s.course_id  for s in slots})
+    courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
+
+    # Group by faculty + day + time
+    from collections import defaultdict
+    schedule = defaultdict(list)
+    for s in slots:
+        day = s.day_of_week.value if hasattr(s.day_of_week, "value") else str(s.day_of_week)
+        key = (s.faculty_id, day, s.start_time)
+        schedule[key].append(s)
+
+    conflicts = []
+    for (fac_id, day, time), slot_list in schedule.items():
+        if len(slot_list) > 1:
+            fac = faculty_map.get(fac_id)
+            conflicts.append({
+                "teacher":    fac.full_name if fac else f"Faculty {fac_id}",
+                "day":        day,
+                "time":       time,
+                "sections":   [f"Sec {s.section}" for s in slot_list],
+                "subjects":   [courses_map.get(s.course_id, type('x', (), {'name':'?'})()).name for s in slot_list],
+            })
+
+    return {"conflicts": conflicts, "total": len(conflicts)}
+
+
+# ── Go Live ───────────────────────────────────────────────────────────────────
 @router.post("/{slot_id}/go-live")
 def go_live(
     slot_id: int,
     payload: GoLiveRequest,
-    current_user: User = Depends(FacultyOrAdmin),
+    current_user: User = Depends(require_roles(UserRole.faculty)),
     db: DBSession = Depends(get_db),
 ):
-    """Faculty clicks Go Live on a timetable slot → creates active session."""
-    slot = db.query(TimetableSlot).filter(TimetableSlot.id == slot_id, TimetableSlot.is_active == True).first()
-    if not slot: raise HTTPException(status_code=404, detail="Timetable slot not found.")
-    if current_user.role != UserRole.admin and slot.faculty_id != current_user.id:
-        raise HTTPException(status_code=403, detail="This slot belongs to another faculty.")
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    existing = db.query(Session).filter(
-        Session.timetable_id == slot_id,
-        Session.status == SessionStatus.active,
-        Session.created_at >= today_start,
+    import secrets
+    slot = db.query(TimetableSlot).filter(TimetableSlot.id == slot_id).first()
+    if not slot: raise HTTPException(status_code=404, detail="Slot not found.")
+    if slot.faculty_id != current_user.id:
+        raise HTTPException(status_code=403, detail="This slot is not assigned to you.")
+
+    active = db.query(Session).filter(
+        Session.faculty_id == current_user.id,
+        Session.status     == SessionStatus.active,
     ).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="This class is already live today.")
-    co = db.query(Course).filter(Course.id == slot.course_id).first()
+    if active:
+        raise HTTPException(status_code=400, detail="You already have an active session. End it first.")
+
+    co  = db.query(Course).filter(Course.id == slot.course_id).first()
     now = datetime.utcnow()
 
-    # ── Time window check ──────────────────────────────────────────────────
-    from datetime import timedelta
     try:
         import pytz
-        ist = pytz.timezone('Asia/Kolkata')
+        ist = pytz.timezone("Asia/Kolkata")
         ist_now = datetime.now(ist).replace(tzinfo=None)
     except ImportError:
+        from datetime import timedelta
         ist_now = now + timedelta(hours=5, minutes=30)
-    slot_start_h, slot_start_m = map(int, slot.start_time.split(':'))
-    slot_end_h,   slot_end_m   = map(int, slot.end_time.split(':'))
-    now_mins   = ist_now.hour * 60 + ist_now.minute
-    start_mins = slot_start_h * 60 + slot_start_m - 5   # 5-min early buffer
-    end_mins   = slot_end_h   * 60 + slot_end_m
 
-    # Allow Go Live from 30 min before class until 60 min after it ends
-    if now_mins < start_mins - 30:
-        mins_until = (slot_start_h*60+slot_start_m) - now_mins
-        raise HTTPException(
-            status_code=400,
-            detail=f"Too early. Go Live opens 30 minutes before class at {slot.start_time} (in {mins_until} minutes)."
-        )
-    if now_mins > end_mins + 60:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Class ended at {slot.end_time}. Go Live is locked 60 minutes after class ends."
-        )
+    day_name = DAYS[ist_now.weekday()] if ist_now.weekday() < 6 else "saturday"
+    slot_day = slot.day_of_week.value if hasattr(slot.day_of_week, "value") else str(slot.day_of_week)
+
+    if slot_day.lower() != day_name.lower():
+        raise HTTPException(status_code=400, detail=f"This slot is for {slot_day.title()}, not today ({day_name.title()}).")
+
+    sh, sm = map(int, slot.start_time.split(":"))
+    eh, em = map(int, slot.end_time.split(":"))
+    now_m  = ist_now.hour * 60 + ist_now.minute
+    slot_start_m = sh * 60 + sm
+    slot_end_m   = eh * 60 + em
+
+    if now_m < slot_start_m - 10:
+        raise HTTPException(status_code=400, detail=f"Too early! Class starts at {slot.start_time}.")
+    if now_m > slot_end_m:
+        raise HTTPException(status_code=400, detail="Class time has passed.")
 
     session = Session(
         course_id    = slot.course_id,
         faculty_id   = slot.faculty_id,
         timetable_id = slot.id,
-        title        = f"{co.name if co else 'Class'} — {slot.day_of_week} {slot.start_time}",
+        title        = f"{co.name if co else 'Class'} - {slot.section} {slot.start_time}",
         location     = slot.room,
         branch       = slot.branch,
         section      = slot.section,
-        sub_section  = slot.sub_section,   # pass sub_section to session
+        sub_section  = slot.sub_section,
         semester     = slot.semester,
         course_type  = slot.course_type,
         gps_lat      = payload.gps_lat,
@@ -323,4 +445,9 @@ def go_live(
         grace_minutes= 15,
     )
     db.add(session); db.commit(); db.refresh(session)
-    return {"session_id": session.id, "qr_token": session.qr_token, "message": "Session is now live!"}
+    return {
+        "session_id": session.id,
+        "qr_token":   session.qr_token,
+        "title":      session.title,
+        "message":    "Session is now LIVE!",
+    }

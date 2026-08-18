@@ -91,8 +91,8 @@ class TimetableSlot(Base):
     __tablename__  = "timetable_slots"
     __table_args__ = {"schema": "public"}
     id          = Column(Integer, primary_key=True, index=True)
-    course_id   = Column(Integer, ForeignKey("courses.id"), nullable=False)
-    faculty_id  = Column(Integer, ForeignKey("users.id"),   nullable=False)
+    course_id   = Column(Integer, ForeignKey("public.courses.id"), nullable=False)
+    faculty_id  = Column(Integer, ForeignKey("public.users.id"),   nullable=False)
     day_of_week = Column(Enum(DayOfWeek), nullable=False)   # Monday–Saturday
     start_time  = Column(String(10), nullable=False)         # "09:00"
     end_time    = Column(String(10), nullable=False)         # "10:00"
@@ -114,8 +114,8 @@ class Session(Base):
     __tablename__  = "sessions"
     __table_args__ = {"schema": "public"}
     id            = Column(Integer, primary_key=True, index=True)
-    course_id     = Column(Integer, ForeignKey("courses.id"), nullable=False)
-    faculty_id    = Column(Integer, ForeignKey("users.id"),   nullable=False)
+    course_id     = Column(Integer, ForeignKey("public.courses.id"), nullable=False)
+    faculty_id    = Column(Integer, ForeignKey("public.users.id"),   nullable=False)
     timetable_id  = Column(Integer, ForeignKey("timetable_slots.id"), nullable=True)
     title         = Column(String(200), nullable=True)
     qr_token      = Column(String(200), unique=True, nullable=True)
@@ -148,7 +148,7 @@ class AttendanceRecord(Base):
     )
     id          = Column(Integer, primary_key=True, index=True)
     session_id  = Column(Integer, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
-    student_id  = Column(Integer, ForeignKey("users.id"),   nullable=False)
+    student_id  = Column(Integer, ForeignKey("public.users.id"),   nullable=False)
     method      = Column(Enum(AttendanceMethod), default=AttendanceMethod.qr)
     status      = Column(Enum(AttendanceStatus), default=AttendanceStatus.present)
     marked_at   = Column(DateTime, default=datetime.utcnow)
