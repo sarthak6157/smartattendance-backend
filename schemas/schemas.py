@@ -73,21 +73,23 @@ class UserListOut(BaseModel):
 class CourseCreate(BaseModel):
     code: str
     name: str
-    department: Optional[str] = None
-    branch:     Optional[str] = None
-    section:    Optional[str] = None
-    semester:   Optional[str] = None
+    department:  Optional[str] = None
+    branch:      Optional[str] = None
+    section:     Optional[str] = None
+    semester:    Optional[str] = None
+    course_type: Optional[str] = None   # theory or lab
     credits: int = 3
 
 class CourseOut(BaseModel):
     id: int
     code: str
     name: str
-    department: Optional[str]
-    branch:     Optional[str]
-    section:    Optional[str]
-    semester:   Optional[str]
-    credits: int
+    department:  Optional[str] = None
+    branch:      Optional[str] = None
+    section:     Optional[str] = None
+    semester:    Optional[str] = None
+    course_type: Optional[str] = None
+    credits: int = 3
     model_config = {"from_attributes": True, "use_enum_values": True}
 
 class SessionCreate(BaseModel):
