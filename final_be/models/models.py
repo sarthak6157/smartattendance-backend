@@ -116,7 +116,7 @@ class Session(Base):
     id            = Column(Integer, primary_key=True, index=True)
     course_id     = Column(Integer, ForeignKey("public.courses.id"), nullable=False)
     faculty_id    = Column(Integer, ForeignKey("public.users.id"),   nullable=False)
-    timetable_id  = Column(Integer, ForeignKey("timetable_slots.id"), nullable=True)
+    timetable_id  = Column(Integer, ForeignKey("public.timetable_slots.id"), nullable=True)
     title         = Column(String(200), nullable=True)
     qr_token      = Column(String(200), unique=True, nullable=True)
     location      = Column(String(200), nullable=True)
@@ -147,7 +147,7 @@ class AttendanceRecord(Base):
         {"schema": "public"}
     )
     id          = Column(Integer, primary_key=True, index=True)
-    session_id  = Column(Integer, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    session_id  = Column(Integer, ForeignKey("public.sessions.id", ondelete="CASCADE"), nullable=False)
     student_id  = Column(Integer, ForeignKey("public.users.id"),   nullable=False)
     method      = Column(Enum(AttendanceMethod), default=AttendanceMethod.qr)
     status      = Column(Enum(AttendanceStatus), default=AttendanceStatus.present)

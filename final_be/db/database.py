@@ -49,7 +49,7 @@ def create_db_engine():
 engine = create_db_engine()
 
 # Set search_path to public schema — prevents collision with Supabase's auth.users table
-from sqlalchemy import event
+from sqlalchemy import event, MetaData
 @event.listens_for(engine, "connect")
 def set_search_path(dbapi_connection, connection_record):
     try:
@@ -59,8 +59,11 @@ def set_search_path(dbapi_connection, connection_record):
     except Exception:
         pass
 
+# Use MetaData with schema="public" so SQLAlchemy resolves ForeignKeys
+# correctly at import time — fixes "could not find table sessions" error
+metadata = MetaData(schema="public")
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+Base = declarative_base(metadata=metadata)
 
 def get_db():
     db = SessionLocal()
