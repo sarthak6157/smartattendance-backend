@@ -31,7 +31,7 @@ DEFAULT_SLOTS = [
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 class SlotCreate(BaseModel):
     course_id:   int
-    faculty_id:  int
+    faculty_id:  Optional[int] = None   # optional for free classes
     day_of_week: str
     start_time:  str
     end_time:    str
@@ -222,9 +222,19 @@ def create_slot(
     db: DBSession = Depends(get_db),
 ):
     co  = db.query(Course).filter(Course.id == payload.course_id).first()
-    fac = db.query(User).filter(User.id == payload.faculty_id, User.role == UserRole.faculty).first()
     if not co:  raise HTTPException(status_code=404, detail="Course not found.")
-    if not fac: raise HTTPException(status_code=404, detail="Faculty not found.")
+
+    # Free classes (Library, Tinkerer, Mentor) don't need a teacher
+    FREE_CODES = {"LIBRARY", "TINKERER", "MENTOR", "CODING", "FREE"}
+    is_free = co.code.upper() in FREE_CODES or co.credits == 0
+
+    fac = None
+    if payload.faculty_id:
+        fac = db.query(User).filter(User.id == payload.faculty_id, User.role == UserRole.faculty).first()
+        if not fac:
+            raise HTTPException(status_code=404, detail="Faculty not found.")
+    elif not is_free:
+        raise HTTPException(status_code=400, detail="Please assign a teacher for this class.")
 
     data = payload.model_dump()
     data["day_of_week"] = data["day_of_week"].strip().lower()

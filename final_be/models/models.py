@@ -92,7 +92,7 @@ class TimetableSlot(Base):
     __table_args__ = {"schema": "public"}
     id          = Column(Integer, primary_key=True, index=True)
     course_id   = Column(Integer, ForeignKey("public.courses.id"), nullable=False)
-    faculty_id  = Column(Integer, ForeignKey("public.users.id"),   nullable=False)
+    faculty_id  = Column(Integer, ForeignKey("public.users.id"),   nullable=True)   # nullable for free classes (Library, Tinkerer etc.)
     day_of_week = Column(Enum(DayOfWeek), nullable=False)   # Monday–Saturday
     start_time  = Column(String(10), nullable=False)         # "09:00"
     end_time    = Column(String(10), nullable=False)         # "10:00"
