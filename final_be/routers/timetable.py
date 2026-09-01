@@ -45,7 +45,7 @@ class SlotCreate(BaseModel):
 class SlotOut(BaseModel):
     id:           int
     course_id:    int
-    faculty_id:   int
+    faculty_id:   Optional[int] = None
     day_of_week:  str
     start_time:   str
     end_time:     str
@@ -200,7 +200,7 @@ def get_timetable_grid(
         time_key = f"{s.start_time}-{s.end_time}"
         co  = courses_map.get(s.course_id)
         fac = faculty_map.get(s.faculty_id)
-        grid[day][time_key] = {
+        entry = {
             "id":           s.id,
             "course_id":    s.course_id,
             "course_name":  co.name  if co  else "?",
@@ -211,6 +211,10 @@ def get_timetable_grid(
             "room":         s.room,
             "sub_section":  s.sub_section,
         }
+        # A cell can legitimately hold more than one slot — e.g. two lab
+        # batches (C1, C2) running in parallel at the same day/time. Store a
+        # LIST per cell so none of them get silently overwritten.
+        grid[day].setdefault(time_key, []).append(entry)
     return {"grid": grid, "time_slots": DEFAULT_SLOTS, "days": DAYS}
 
 
@@ -245,7 +249,7 @@ def create_slot(
     d.day_of_week  = slot.day_of_week.value if hasattr(slot.day_of_week, "value") else str(slot.day_of_week)
     d.course_name  = co.name
     d.course_code  = co.code
-    d.faculty_name = fac.full_name
+    d.faculty_name = fac.full_name if fac else None
     return d
 
 
@@ -260,9 +264,19 @@ def update_slot(
     slot = db.query(TimetableSlot).filter(TimetableSlot.id == slot_id).first()
     if not slot: raise HTTPException(status_code=404, detail="Slot not found.")
     co  = db.query(Course).filter(Course.id == payload.course_id).first()
-    fac = db.query(User).filter(User.id == payload.faculty_id).first()
     if not co:  raise HTTPException(status_code=404, detail="Course not found.")
-    if not fac: raise HTTPException(status_code=404, detail="Faculty not found.")
+
+    # Free classes (Library, Tinkerer, Mentor) don't need a teacher — same rule as create_slot
+    FREE_CODES = {"LIBRARY", "TINKERER", "MENTOR", "CODING", "FREE"}
+    is_free = co.code.upper() in FREE_CODES or co.credits == 0
+
+    fac = None
+    if payload.faculty_id:
+        fac = db.query(User).filter(User.id == payload.faculty_id, User.role == UserRole.faculty).first()
+        if not fac:
+            raise HTTPException(status_code=404, detail="Faculty not found.")
+    elif not is_free:
+        raise HTTPException(status_code=400, detail="Please assign a teacher for this class.")
 
     for k, v in payload.model_dump().items():
         if k == "day_of_week": v = v.strip().lower()
@@ -273,7 +287,7 @@ def update_slot(
     d.day_of_week  = slot.day_of_week.value if hasattr(slot.day_of_week, "value") else str(slot.day_of_week)
     d.course_name  = co.name
     d.course_code  = co.code
-    d.faculty_name = fac.full_name
+    d.faculty_name = fac.full_name if fac else None
     return d
 
 
