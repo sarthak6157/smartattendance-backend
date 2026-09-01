@@ -74,7 +74,8 @@ def mark_full_flow(
         try:
             dist    = haversine(session.gps_lat, session.gps_lng,
                                 payload.student_lat, payload.student_lng)
-            allowed = get_settings(db).gps_range or 50
+            settings_obj = get_settings(db)
+            allowed = settings_obj.gps_range if settings_obj.gps_range is not None else 50
             if dist > allowed:
                 raise HTTPException(
                     status_code=403,

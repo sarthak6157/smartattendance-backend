@@ -75,7 +75,7 @@ def create_course(
         section=payload.section,
         semester=semester,
         course_type=payload.course_type or detect_type(payload.name),
-        credits=payload.credits or 3,
+        credits=payload.credits if payload.credits is not None else 3,
     )
     db.add(course); db.commit(); db.refresh(course)
     return course
@@ -241,7 +241,7 @@ def update_course(
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course: raise HTTPException(status_code=404, detail="Course not found.")
     course.name        = payload.name
-    course.credits     = payload.credits or course.credits
+    course.credits     = payload.credits if payload.credits is not None else course.credits
     course.course_type = payload.course_type or course.course_type
     db.commit(); db.refresh(course)
     return course

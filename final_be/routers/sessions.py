@@ -85,6 +85,18 @@ def get_active(
             func.upper(Session.section) == sec,
         ))
 
+    # If a student is asking, also narrow to their lab batch — a session tied
+    # to a specific sub_section (e.g. a parallel lab batch) shouldn't show as
+    # "live" for students in a different batch. Sessions with no sub_section
+    # set are for everyone and always pass through.
+    if current_user.role == UserRole.student:
+        student_subsec = (current_user.sub_section or "").strip().upper()
+        q = q.filter(or_(
+            Session.sub_section == None,
+            Session.sub_section == '',
+            func.upper(Session.sub_section) == student_subsec,
+        ))
+
     # Also only return sessions that are for this specific section
     # (not sessions from other classes accidentally leaking through)
     results = q.all()
@@ -116,6 +128,11 @@ def get_my_active_sessions(
             Session.section == None, Session.section == '',
             func.upper(Session.section) == sec,
         ))
+    student_subsec = (current_user.sub_section or "").strip().upper()
+    q = q.filter(or_(
+        Session.sub_section == None, Session.sub_section == '',
+        func.upper(Session.sub_section) == student_subsec,
+    ))
     return q.all()
 
 
