@@ -97,18 +97,22 @@ def list_slots(
     q = db.query(TimetableSlot).filter(TimetableSlot.is_active == True)
 
     if current_user.role == UserRole.faculty:
-        q = q.filter(TimetableSlot.faculty_id == current_user.id)
+        # Include unassigned "free period" slots (Library, Coding Practice,
+        # etc.) too — these have no owning teacher, but any faculty needs to
+        # be able to see and go-live them, otherwise attendance can never be
+        # taken for a free period at all.
+        q = q.filter(or_(TimetableSlot.faculty_id == current_user.id, TimetableSlot.faculty_id == None))
     elif faculty_id:
         q = q.filter(TimetableSlot.faculty_id == faculty_id)
 
     if current_user.role == UserRole.student:
         effective_branch   = branch  or current_user.branch or current_user.department
         effective_section  = section or current_user.section
-        raw_subsec = current_user.course or ""
-        effective_subsection = raw_subsec.strip() if (
-            len(raw_subsec.strip()) <= 4 and
-            raw_subsec.strip() not in ["B.Tech","B.E","BCA","MCA","MBA","M.Tech","B.Sc"]
-        ) else None
+        # Lab batch (e.g. "C1") lives in User.sub_section, NOT User.course
+        # (course holds the degree type, e.g. "B.Tech"). Reading the wrong
+        # field here meant effective_subsection was almost always empty,
+        # which fell through to showing every batch's lab slots.
+        effective_subsection = (current_user.sub_section or "").strip() or None
     else:
         effective_branch     = branch
         effective_section    = section
@@ -411,7 +415,10 @@ def go_live(
     import secrets
     slot = db.query(TimetableSlot).filter(TimetableSlot.id == slot_id).first()
     if not slot: raise HTTPException(status_code=404, detail="Slot not found.")
-    if slot.faculty_id != current_user.id:
+    # Free-period slots (Library, Coding Practice, etc.) have no assigned
+    # teacher — any faculty can go live for them. Assigned slots still
+    # require the owning faculty.
+    if slot.faculty_id is not None and slot.faculty_id != current_user.id:
         raise HTTPException(status_code=403, detail="This slot is not assigned to you.")
 
     active = db.query(Session).filter(
@@ -451,7 +458,10 @@ def go_live(
 
     session = Session(
         course_id    = slot.course_id,
-        faculty_id   = slot.faculty_id,
+        # Session.faculty_id is required (attendance/audit trail needs a
+        # responsible person on record) — for a free period, that's whoever
+        # actually went live, not the slot's (missing) assigned teacher.
+        faculty_id   = slot.faculty_id if slot.faculty_id is not None else current_user.id,
         timetable_id = slot.id,
         title        = f"{co.name if co else 'Class'} - {slot.section} {slot.start_time}",
         location     = slot.room,
