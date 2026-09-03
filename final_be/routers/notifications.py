@@ -18,7 +18,7 @@ class PushSubscription(BaseModel):
     keys:       dict   # {p256dh, auth}
 
 class PushSubscriptionRecord(BaseModel):
-    user_id:      int
+    user_id:      str
     subscription: dict
 
 # In-memory store for push subscriptions (replace with DB table in production)
@@ -47,7 +47,7 @@ def unsubscribe_push(current_user: User = Depends(get_current_user)):
     return {"message": "Unsubscribed from push notifications."}
 
 # ── Send push notification to a user ─────────────────────────────────────────
-def send_push_to_user(user_id: int, title: str, body: str, url: str = "/"):
+def send_push_to_user(user_id: str, title: str, body: str, url: str = "/"):
     """Send a web push notification to all devices of a user."""
     subs = _push_subscriptions.get(user_id, [])
     if not subs:

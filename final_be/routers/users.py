@@ -137,7 +137,7 @@ def admin_create_user(payload: UserCreate, _: User = Depends(AdminOnly), db: Ses
 
 
 @router.get("/{user_id}", response_model=UserOut)
-def get_user(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_user(user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.role != UserRole.admin and current_user.id != user_id:
         raise HTTPException(status_code=403, detail="Access denied.")
     user = db.query(User).filter(User.id == user_id).first()
@@ -146,7 +146,7 @@ def get_user(user_id: int, current_user: User = Depends(get_current_user), db: S
 
 
 @router.patch("/{user_id}", response_model=UserOut)
-def update_user(user_id: int, payload: UserUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_user(user_id: str, payload: UserUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.role != UserRole.admin and current_user.id != user_id:
         raise HTTPException(status_code=403, detail="Access denied.")
     user = db.query(User).filter(User.id == user_id).first()
@@ -166,7 +166,7 @@ def update_user(user_id: int, payload: UserUpdate, current_user: User = Depends(
 
 
 @router.patch("/{user_id}/status", response_model=UserOut)
-def update_status(user_id: int, payload: UserStatusUpdate, _: User = Depends(AdminOnly), db: Session = Depends(get_db)):
+def update_status(user_id: str, payload: UserStatusUpdate, _: User = Depends(AdminOnly), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user: raise HTTPException(status_code=404, detail="User not found.")
     user.status = payload.status; user.updated_at = datetime.utcnow()
@@ -176,7 +176,7 @@ def update_status(user_id: int, payload: UserStatusUpdate, _: User = Depends(Adm
 
 @router.post("/{user_id}/register-face", response_model=UserOut)
 def register_face(
-    user_id: int, payload: FaceRegisterRequest,
+    user_id: str, payload: FaceRegisterRequest,
     current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """Store face image + descriptor for a student. Student can register their own face."""
@@ -193,7 +193,7 @@ def register_face(
 
 
 @router.delete("/{user_id}", status_code=204)
-def delete_user(user_id: int, current_admin: User = Depends(AdminOnly), db: Session = Depends(get_db)):
+def delete_user(user_id: str, current_admin: User = Depends(AdminOnly), db: Session = Depends(get_db)):
     if user_id == current_admin.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account.")
     user = db.query(User).filter(User.id == user_id).first()
@@ -377,7 +377,7 @@ def bulk_promote(
 
 @router.post("/{user_id}/promote")
 def promote_one_student(
-    user_id: int,
+    user_id: str,
     payload: PromoteOneRequest,
     _: User = Depends(AdminOnly),
     db: Session = Depends(get_db),

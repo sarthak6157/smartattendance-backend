@@ -2,7 +2,7 @@
 import re
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as DBSession
@@ -31,7 +31,7 @@ DEFAULT_SLOTS = [
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 class SlotCreate(BaseModel):
     course_id:   int
-    faculty_id:  Optional[int] = None   # optional for free classes
+    faculty_id:  Optional[str] = None   # optional for free classes
     day_of_week: str
     start_time:  str
     end_time:    str
@@ -45,7 +45,7 @@ class SlotCreate(BaseModel):
 class SlotOut(BaseModel):
     id:           int
     course_id:    int
-    faculty_id:   Optional[int] = None
+    faculty_id:   Optional[str] = None
     day_of_week:  str
     start_time:   str
     end_time:     str
@@ -90,7 +90,7 @@ def list_slots(
     branch:     Optional[str] = Query(None),
     section:    Optional[str] = Query(None),
     semester:   Optional[str] = Query(None),
-    faculty_id: Optional[int] = Query(None),
+    faculty_id: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
@@ -331,7 +331,7 @@ def copy_timetable(
 
     # Admin user id=1 as placeholder for unassigned
     admin = db.query(User).filter(User.role == UserRole.admin).first()
-    placeholder_id = admin.id if admin else 1
+    placeholder_id = admin.id if admin else None
 
     new_slots = []
     for s in slots:
@@ -484,4 +484,186 @@ def go_live(
         "qr_token":   session.qr_token,
         "title":      session.title,
         "message":    "Session is now LIVE!",
+    }
+
+
+# ── Bulk Timetable Import ─────────────────────────────────────────────────────
+@router.get("/bulk-template")
+def download_timetable_template(_: User = Depends(AdminOnly)):
+    """Download Excel template for bulk timetable import."""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+    except ImportError:
+        raise HTTPException(status_code=500, detail="openpyxl not installed.")
+
+    import io
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Timetable"
+
+    header_fill = PatternFill("solid", fgColor="1a3c6e")
+    headers = ["Branch","Section","Semester","Day","StartTime","EndTime","CourseCode","FacultyID","Room","SubSection","CourseType"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font      = Font(bold=True, color="FFFFFF")
+        cell.fill      = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    # Sample rows
+    samples = [
+        ("CSE (AI-ML-DL)","A","2nd","monday","09:30","10:30","EAS211","101","Room 301","","theory"),
+        ("CSE (AI-ML-DL)","A","2nd","monday","10:30","11:25","TGE203","102","Room 302","","theory"),
+        ("CSE (AI-ML-DL)","A","2nd","tuesday","11:30","12:25","ECS251","103","Lab 201","A1","lab"),
+        ("CSE (AI-ML-DL)","A","2nd","tuesday","11:30","12:25","ECS251","104","Lab 202","A2","lab"),
+        ("CSE (AI-ML-DL)","A","2nd","wednesday","09:10","09:25","LIBRARY","","Library","","theory"),
+    ]
+    for r, row in enumerate(samples, 2):
+        for col, val in enumerate(row, 1):
+            ws.cell(row=r, column=col, value=val)
+
+    col_widths = [20,8,8,12,10,10,14,10,12,12,10]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    # Notes
+    note_row = len(samples) + 3
+    ws.merge_cells(f"A{note_row}:K{note_row}")
+    ws.cell(row=note_row, column=1, value="Notes: Day must be lowercase (monday/tuesday etc). FacultyID is the numeric ID from users table. Leave FacultyID blank for free classes (Library/Tinkerer/Mentor). SubSection is optional for labs (A1/A2).").font = Font(italic=True, color="666666")
+
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=timetable_template.xlsx"}
+    )
+
+
+@router.post("/bulk-import")
+async def bulk_import_timetable(
+    file: UploadFile, File = File(...),
+    clear_existing: bool = False,
+    _: User = Depends(AdminOnly),
+    db: DBSession = Depends(get_db),
+):
+    """
+    Bulk import timetable from Excel/CSV.
+    Columns: Branch,Section,Semester,Day,StartTime,EndTime,CourseCode,FacultyID,Room,SubSection,CourseType
+    """
+    import io as _io
+    content = await file.read()
+    ext = file.filename.lower().split('.')[-1]
+
+    rows = []
+    if ext == 'csv':
+        import csv
+        text = content.decode('utf-8-sig')
+        reader = csv.DictReader(_io.StringIO(text))
+        rows = list(reader)
+    elif ext in ('xlsx','xls'):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(_io.BytesIO(content))
+            ws = wb.active
+            headers = [str(c.value).strip() if c.value else '' for c in next(ws.iter_rows())]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if any(v for v in row):  # skip empty rows
+                    rows.append({headers[i]: (str(v).strip() if v is not None else '') for i,v in enumerate(row)})
+        except ImportError:
+            raise HTTPException(status_code=500, detail="openpyxl not installed.")
+    else:
+        raise HTTPException(status_code=400, detail="Only .csv, .xlsx or .xls files supported.")
+
+    # Load all courses and faculty for lookup
+    all_courses = {c.code.upper(): c for c in db.query(Course).all()}
+    all_faculty  = {str(f.id): f for f in db.query(User).filter(User.role == UserRole.faculty).all()}
+    FREE_CODES   = {"LIBRARY","TINKERER","MENTOR","CODING","FREE"}
+
+    added, skipped, errors = [], [], []
+
+    if clear_existing:
+        # Get unique branch/section/semester combos from file and clear those
+        combos = set()
+        for row in rows:
+            b = (row.get('Branch') or '').strip()
+            s = (row.get('Section') or '').strip()
+            sem = (row.get('Semester') or '').strip()
+            if b and s and sem:
+                combos.add((b.lower(), s.lower(), sem.lower()))
+        for (b,s,sem) in combos:
+            db.query(TimetableSlot).filter(
+                func.lower(TimetableSlot.branch)   == b,
+                func.lower(TimetableSlot.section)  == s,
+                func.lower(TimetableSlot.semester) == sem,
+                TimetableSlot.is_active == True,
+            ).delete(synchronize_session=False)
+
+    for i, row in enumerate(rows, 2):
+        try:
+            branch     = (row.get('Branch')     or '').strip()
+            section    = (row.get('Section')    or '').strip()
+            semester   = (row.get('Semester')   or '').strip()
+            day        = (row.get('Day')        or '').strip().lower()
+            start_time = (row.get('StartTime')  or '').strip()
+            end_time   = (row.get('EndTime')    or '').strip()
+            course_code= (row.get('CourseCode') or '').strip().upper()
+            faculty_id = (row.get('FacultyID')  or '').strip()
+            room       = (row.get('Room')       or '').strip() or None
+            sub_section= (row.get('SubSection') or '').strip().upper() or None
+            course_type= (row.get('CourseType') or 'theory').strip().lower()
+
+            if not all([branch, section, semester, day, start_time, end_time, course_code]):
+                errors.append(f"Row {i}: Missing required fields")
+                continue
+
+            if day not in DAYS:
+                errors.append(f"Row {i}: Invalid day '{day}' — must be monday/tuesday etc.")
+                continue
+
+            course = all_courses.get(course_code)
+            if not course:
+                errors.append(f"Row {i}: Course code '{course_code}' not found — add it in Courses first.")
+                continue
+
+            is_free = course_code in FREE_CODES or (course.credits is not None and course.credits == 0)
+
+            fac_id = None
+            if faculty_id:
+                if faculty_id not in all_faculty:
+                    errors.append(f"Row {i}: Faculty ID '{faculty_id}' not found.")
+                    continue
+                fac_id = int(faculty_id)
+            elif not is_free:
+                errors.append(f"Row {i}: Faculty ID required for non-free class '{course_code}'.")
+                continue
+
+            slot = TimetableSlot(
+                course_id   = course.id,
+                faculty_id  = fac_id,
+                day_of_week = day,
+                start_time  = start_time,
+                end_time    = end_time,
+                room        = room,
+                branch      = branch,
+                section     = section,
+                sub_section = sub_section,
+                semester    = semester,
+                course_type = course_type,
+                is_active   = True,
+            )
+            db.add(slot)
+            added.append(f"{day} {start_time} {course_code}")
+
+        except Exception as e:
+            errors.append(f"Row {i}: {str(e)}")
+
+    db.commit()
+
+    return {
+        "added":   len(added),
+        "skipped": len(skipped),
+        "errors":  errors[:20],  # show max 20 errors
+        "message": f"Added {len(added)} slots. {len(errors)} errors.",
     }

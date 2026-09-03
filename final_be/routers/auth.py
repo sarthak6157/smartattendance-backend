@@ -121,7 +121,7 @@ class AdminResetPwd(_AuthBM):
 
 @router.post("/admin/reset-password/{user_id}", status_code=200)
 def admin_reset_password(
-    user_id: int,
+    user_id: str,
     payload: AdminResetPwd,
     current_admin: User = Depends(_req(_UR.admin)),
     db: Session = Depends(get_db),

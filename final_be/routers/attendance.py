@@ -158,7 +158,7 @@ def session_attendance(
 
 @router.get("/student/{student_id}", response_model=AttendanceListOut)
 def student_history(
-    student_id: int,
+    student_id: str,
     course_id:  Optional[int] = None,
     skip: int = 0, limit: int = 200,
     current_user: User = Depends(get_current_user),
@@ -332,7 +332,7 @@ def export_session_attendance(
 
 @router.get("/export/student/{student_id}")
 def export_student_attendance(
-    student_id: int,
+    student_id: str,
     format: str = Query("excel", pattern="^(excel|csv)$"),
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
@@ -446,7 +446,7 @@ def export_student_attendance(
 # ── Feature 2: AI Insights ────────────────────────────────────────────────────
 @router.get("/insights/student/{student_id}")
 def student_insights(
-    student_id: int,
+    student_id: str,
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):

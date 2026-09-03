@@ -47,7 +47,7 @@ class FaceRegisterRequest(BaseModel):
     face_descriptor: Optional[str] = None  # JSON array of 128 floats from face-api.js
 
 class UserOut(BaseModel):
-    id: int
+    id: str
     full_name: str
     inst_id: str
     email: str
@@ -104,7 +104,7 @@ class SessionCreate(BaseModel):
 class SessionOut(BaseModel):
     id: int
     course_id: int
-    faculty_id: int
+    faculty_id: str
     timetable_id: Optional[int] = None
     title: Optional[str] = None
     qr_token: Optional[str] = None
@@ -134,14 +134,14 @@ class AttendanceMarkQR(BaseModel):
 
 class AttendanceMarkManual(BaseModel):
     session_id: int
-    student_id: int
+    student_id: str
     status: AttendanceStatus = AttendanceStatus.present
     notes: Optional[str] = None
 
 class AttendanceOut(BaseModel):
     id: int
     session_id: int
-    student_id: int
+    student_id: str
     method: AttendanceMethod
     status: AttendanceStatus
     marked_at: datetime

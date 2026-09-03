@@ -41,11 +41,10 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        # sub is always stored as string — convert back to int for DB query
         sub = payload.get("sub")
         if sub is None:
             raise HTTPException(status_code=401, detail="Could not validate credentials")
-        user_id = int(sub)
+        user_id = sub  # inst_id is now the primary key — it's a string, no int() cast
     except (JWTError, ValueError, TypeError):
         raise HTTPException(status_code=401, detail="Could not validate credentials")
     user = db.query(User).filter(User.id == user_id).first()

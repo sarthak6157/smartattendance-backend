@@ -18,7 +18,7 @@ FacultyOrAdmin = require_roles(UserRole.faculty, UserRole.admin)
 @router.get("", response_model=SessionListOut)
 def list_sessions(
     course_id:  Optional[int] = None,
-    faculty_id: Optional[int] = None,
+    faculty_id: Optional[str] = None,
     status_:    Optional[str] = Query(None, alias="status"),
     branch:     Optional[str] = None,
     section:    Optional[str] = None,

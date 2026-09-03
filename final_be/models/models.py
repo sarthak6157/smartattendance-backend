@@ -2,7 +2,7 @@
 from datetime import datetime
 import enum
 from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, synonym
 from db.database import Base
 
 
@@ -43,9 +43,14 @@ class DayOfWeek(str, enum.Enum):
 class User(Base):
     __tablename__  = "users"
     __table_args__ = {"schema": "public"}  # Explicitly use public schema — prevents collision with auth.users
-    id              = Column(Integer, primary_key=True, index=True)
+    # inst_id (e.g. "TMU003", "STU006") is now the REAL primary key — it's
+    # what admins actually type/see, and what every other table's foreign key
+    # stores. `id` is kept as a synonym for the same column purely so the
+    # rest of the codebase (current_user.id, User.id == ..., etc.) keeps
+    # working unchanged — it is NOT a separate column.
+    inst_id         = Column(String(50), primary_key=True, unique=True, nullable=False, index=True)
+    id              = synonym("inst_id")
     full_name       = Column(String(120), nullable=False)
-    inst_id         = Column(String(50), unique=True, nullable=False, index=True)
     email           = Column(String(150), unique=True, nullable=False, index=True)
     role            = Column(Enum(UserRole), default=UserRole.student, nullable=False)
     status          = Column(Enum(UserStatus), default=UserStatus.pending, nullable=False)
@@ -92,7 +97,7 @@ class TimetableSlot(Base):
     __table_args__ = {"schema": "public"}
     id          = Column(Integer, primary_key=True, index=True)
     course_id   = Column(Integer, ForeignKey("public.courses.id"), nullable=False)
-    faculty_id  = Column(Integer, ForeignKey("public.users.id"),   nullable=True)   # nullable for free classes (Library, Tinkerer etc.)
+    faculty_id  = Column(String(50), ForeignKey("public.users.inst_id"), nullable=True)   # nullable for free classes (Library, Tinkerer etc.)
     day_of_week = Column(Enum(DayOfWeek), nullable=False)   # Monday–Saturday
     start_time  = Column(String(10), nullable=False)         # "09:00"
     end_time    = Column(String(10), nullable=False)         # "10:00"
@@ -115,7 +120,7 @@ class Session(Base):
     __table_args__ = {"schema": "public"}
     id            = Column(Integer, primary_key=True, index=True)
     course_id     = Column(Integer, ForeignKey("public.courses.id"), nullable=False)
-    faculty_id    = Column(Integer, ForeignKey("public.users.id"),   nullable=False)
+    faculty_id    = Column(String(50), ForeignKey("public.users.inst_id"), nullable=False)
     timetable_id  = Column(Integer, ForeignKey("public.timetable_slots.id"), nullable=True)
     title         = Column(String(200), nullable=True)
     qr_token      = Column(String(200), unique=True, nullable=True)
@@ -148,7 +153,7 @@ class AttendanceRecord(Base):
     )
     id          = Column(Integer, primary_key=True, index=True)
     session_id  = Column(Integer, ForeignKey("public.sessions.id", ondelete="CASCADE"), nullable=False)
-    student_id  = Column(Integer, ForeignKey("public.users.id"),   nullable=False)
+    student_id  = Column(String(50), ForeignKey("public.users.inst_id"), nullable=False)
     method      = Column(Enum(AttendanceMethod), default=AttendanceMethod.qr)
     status      = Column(Enum(AttendanceStatus), default=AttendanceStatus.present)
     marked_at   = Column(DateTime, default=datetime.utcnow)
