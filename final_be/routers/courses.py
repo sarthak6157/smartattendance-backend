@@ -223,7 +223,7 @@ def courses_by_semester(_: User = Depends(get_current_user), db: DBSession = Dep
 
 # ── Delete course ─────────────────────────────────────────────────────────────
 @router.delete("/{course_id}", status_code=204)
-def delete_course(course_id: int, _: User = Depends(AdminOnly), db: DBSession = Depends(get_db)):
+def delete_course(course_id: str, _: User = Depends(AdminOnly), db: DBSession = Depends(get_db)):
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found.")
@@ -233,7 +233,7 @@ def delete_course(course_id: int, _: User = Depends(AdminOnly), db: DBSession = 
 # ── Update course ─────────────────────────────────────────────────────────────
 @router.patch("/{course_id}", response_model=CourseOut)
 def update_course(
-    course_id: int,
+    course_id: str,
     payload: CourseCreate,
     _: User = Depends(AdminOnly),
     db: DBSession = Depends(get_db),

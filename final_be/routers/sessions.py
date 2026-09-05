@@ -17,7 +17,7 @@ FacultyOrAdmin = require_roles(UserRole.faculty, UserRole.admin)
 
 @router.get("", response_model=SessionListOut)
 def list_sessions(
-    course_id:  Optional[int] = None,
+    course_id:  Optional[str] = None,
     faculty_id: Optional[str] = None,
     status_:    Optional[str] = Query(None, alias="status"),
     branch:     Optional[str] = None,
@@ -180,7 +180,7 @@ def delete_session(session_id: int, _: User = Depends(require_roles(UserRole.adm
 from pydantic import BaseModel
 
 class ExtraClassRequest(BaseModel):
-    course_id:    int
+    course_id:    str
     title:        str
     location:     str = ""
     branch:       str = ""

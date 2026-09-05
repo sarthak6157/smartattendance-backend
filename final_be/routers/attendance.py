@@ -159,7 +159,7 @@ def session_attendance(
 @router.get("/student/{student_id}", response_model=AttendanceListOut)
 def student_history(
     student_id: str,
-    course_id:  Optional[int] = None,
+    course_id:  Optional[str] = None,
     skip: int = 0, limit: int = 200,
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),

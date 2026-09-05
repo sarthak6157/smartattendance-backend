@@ -77,8 +77,11 @@ class User(Base):
 class Course(Base):
     __tablename__  = "courses"
     __table_args__ = {"schema": "public"}
-    id         = Column(Integer, primary_key=True, index=True)
-    code       = Column(String(20), unique=True, nullable=False)
+    # code (e.g. "EAS211") is now the REAL primary key. `id` is kept as a
+    # synonym for the same column so the rest of the codebase (Course.id,
+    # course.id, etc.) keeps working unchanged.
+    code       = Column(String(20), primary_key=True, unique=True, nullable=False)
+    id         = synonym("code")
     name       = Column(String(150), nullable=False)
     department = Column(String(150), nullable=True)
     branch     = Column(String(150), nullable=True)
@@ -96,7 +99,7 @@ class TimetableSlot(Base):
     __tablename__  = "timetable_slots"
     __table_args__ = {"schema": "public"}
     id          = Column(Integer, primary_key=True, index=True)
-    course_id   = Column(Integer, ForeignKey("public.courses.id"), nullable=False)
+    course_id   = Column(String(20), ForeignKey("public.courses.code"), nullable=False)
     faculty_id  = Column(String(50), ForeignKey("public.users.inst_id"), nullable=True)   # nullable for free classes (Library, Tinkerer etc.)
     day_of_week = Column(Enum(DayOfWeek), nullable=False)   # Monday–Saturday
     start_time  = Column(String(10), nullable=False)         # "09:00"
@@ -119,7 +122,7 @@ class Session(Base):
     __tablename__  = "sessions"
     __table_args__ = {"schema": "public"}
     id            = Column(Integer, primary_key=True, index=True)
-    course_id     = Column(Integer, ForeignKey("public.courses.id"), nullable=False)
+    course_id     = Column(String(20), ForeignKey("public.courses.code"), nullable=False)
     faculty_id    = Column(String(50), ForeignKey("public.users.inst_id"), nullable=False)
     timetable_id  = Column(Integer, ForeignKey("public.timetable_slots.id"), nullable=True)
     title         = Column(String(200), nullable=True)

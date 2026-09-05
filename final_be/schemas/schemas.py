@@ -81,7 +81,7 @@ class CourseCreate(BaseModel):
     credits: int = 3
 
 class CourseOut(BaseModel):
-    id: int
+    id: str
     code: str
     name: str
     department:  Optional[str] = None
@@ -93,7 +93,7 @@ class CourseOut(BaseModel):
     model_config = {"from_attributes": True, "use_enum_values": True}
 
 class SessionCreate(BaseModel):
-    course_id: int
+    course_id: str
     title: Optional[str] = None
     location: Optional[str] = None
     scheduled_at: datetime
@@ -103,7 +103,7 @@ class SessionCreate(BaseModel):
 
 class SessionOut(BaseModel):
     id: int
-    course_id: int
+    course_id: str
     faculty_id: str
     timetable_id: Optional[int] = None
     title: Optional[str] = None
