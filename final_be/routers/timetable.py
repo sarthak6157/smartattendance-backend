@@ -258,6 +258,61 @@ def create_slot(
 
 
 # ── Update slot ───────────────────────────────────────────────────────────────
+@router.get("/bulk-template")
+def download_timetable_template(_: User = Depends(AdminOnly)):
+    """Download Excel template for bulk timetable import."""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+    except ImportError:
+        raise HTTPException(status_code=500, detail="openpyxl not installed.")
+
+    import io
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Timetable"
+
+    header_fill = PatternFill("solid", fgColor="1a3c6e")
+    headers = ["Branch","Section","Semester","Day","StartTime","EndTime","CourseCode","FacultyID","Room","SubSection","CourseType"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font      = Font(bold=True, color="FFFFFF")
+        cell.fill      = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    # Sample rows
+    samples = [
+        ("CSE (AI-ML-DL)","A","2nd","monday","09:30","10:30","EAS211","101","Room 301","","theory"),
+        ("CSE (AI-ML-DL)","A","2nd","monday","10:30","11:25","TGE203","102","Room 302","","theory"),
+        ("CSE (AI-ML-DL)","A","2nd","tuesday","11:30","12:25","ECS251","103","Lab 201","A1","lab"),
+        ("CSE (AI-ML-DL)","A","2nd","tuesday","11:30","12:25","ECS251","104","Lab 202","A2","lab"),
+        ("CSE (AI-ML-DL)","A","2nd","wednesday","09:10","09:25","LIBRARY","","Library","","theory"),
+    ]
+    for r, row in enumerate(samples, 2):
+        for col, val in enumerate(row, 1):
+            ws.cell(row=r, column=col, value=val)
+
+    col_widths = [20,8,8,12,10,10,14,10,12,12,10]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    # Notes
+    note_row = len(samples) + 3
+    ws.merge_cells(f"A{note_row}:K{note_row}")
+    ws.cell(row=note_row, column=1, value="Notes: Day must be lowercase (monday/tuesday etc). FacultyID is the numeric ID from users table. Leave FacultyID blank for free classes (Library/Tinkerer/Mentor). SubSection is optional for labs (A1/A2).").font = Font(italic=True, color="666666")
+
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=timetable_template.xlsx"}
+    )
+
+
+
+
 @router.patch("/{slot_id}", response_model=SlotOut)
 def update_slot(
     slot_id: int,
@@ -488,59 +543,6 @@ def go_live(
 
 
 # ── Bulk Timetable Import ─────────────────────────────────────────────────────
-@router.get("/bulk-template")
-def download_timetable_template(_: User = Depends(AdminOnly)):
-    """Download Excel template for bulk timetable import."""
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
-    except ImportError:
-        raise HTTPException(status_code=500, detail="openpyxl not installed.")
-
-    import io
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Timetable"
-
-    header_fill = PatternFill("solid", fgColor="1a3c6e")
-    headers = ["Branch","Section","Semester","Day","StartTime","EndTime","CourseCode","FacultyID","Room","SubSection","CourseType"]
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font      = Font(bold=True, color="FFFFFF")
-        cell.fill      = header_fill
-        cell.alignment = Alignment(horizontal="center")
-
-    # Sample rows
-    samples = [
-        ("CSE (AI-ML-DL)","A","2nd","monday","09:30","10:30","EAS211","101","Room 301","","theory"),
-        ("CSE (AI-ML-DL)","A","2nd","monday","10:30","11:25","TGE203","102","Room 302","","theory"),
-        ("CSE (AI-ML-DL)","A","2nd","tuesday","11:30","12:25","ECS251","103","Lab 201","A1","lab"),
-        ("CSE (AI-ML-DL)","A","2nd","tuesday","11:30","12:25","ECS251","104","Lab 202","A2","lab"),
-        ("CSE (AI-ML-DL)","A","2nd","wednesday","09:10","09:25","LIBRARY","","Library","","theory"),
-    ]
-    for r, row in enumerate(samples, 2):
-        for col, val in enumerate(row, 1):
-            ws.cell(row=r, column=col, value=val)
-
-    col_widths = [20,8,8,12,10,10,14,10,12,12,10]
-    for i, w in enumerate(col_widths, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
-
-    # Notes
-    note_row = len(samples) + 3
-    ws.merge_cells(f"A{note_row}:K{note_row}")
-    ws.cell(row=note_row, column=1, value="Notes: Day must be lowercase (monday/tuesday etc). FacultyID is the numeric ID from users table. Leave FacultyID blank for free classes (Library/Tinkerer/Mentor). SubSection is optional for labs (A1/A2).").font = Font(italic=True, color="666666")
-
-    buf = io.BytesIO()
-    wb.save(buf); buf.seek(0)
-    from fastapi.responses import StreamingResponse
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=timetable_template.xlsx"}
-    )
-
-
 @router.post("/bulk-import")
 async def bulk_import_timetable(
     file: UploadFile, File = File(...),
