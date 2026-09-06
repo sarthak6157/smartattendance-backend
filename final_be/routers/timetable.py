@@ -404,6 +404,164 @@ def check_conflicts(
     return {"conflicts": conflicts, "total": len(conflicts)}
 
 
+# ── Bulk timetable import ────────────────────────────────────────────────────
+import io
+from fastapi import UploadFile, File
+from fastapi.responses import Response
+
+BULK_HEADERS = ["Day", "StartTime", "EndTime", "Branch", "Section", "Semester",
+                "SubjectCode", "FacultyID", "Room", "LabBatch", "ClassType"]
+
+@router.get("/bulk-template")
+def download_bulk_template(_=Depends(AdminOnly)):
+    """Download an Excel template for bulk timetable import."""
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Timetable"
+    ws.append(BULK_HEADERS)
+    ws.append(["monday", "09:30", "10:30", "CSE (AI-ML-DL)", "C", "3rd",
+               "EAS211", "TMU003", "4115", "", "theory"])
+    ws.append(["monday", "14:25", "15:10", "CSE (AI-ML-DL)", "C", "3rd",
+               "EAS262", "TMU005", "Lab-2", "C1", "lab"])
+    ws.append(["monday", "14:25", "15:10", "CSE (AI-ML-DL)", "C", "3rd",
+               "EAS262", "TMU007", "Lab-3", "C2", "lab"])
+    ws.append(["tuesday", "09:30", "10:30", "CSE (AI-ML-DL)", "C", "3rd",
+               "LIBRARY", "", "", "", "theory"])
+    # widen columns a bit so the header text isn't cut off
+    for i, h in enumerate(BULK_HEADERS, start=1):
+        ws.column_dimensions[chr(64+i)].width = max(12, len(h)+2)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=timetable_template.xlsx"}
+    )
+
+
+@router.post("/bulk-import")
+async def bulk_import_timetable(
+    file: UploadFile = File(...),
+    clear_existing: bool = Query(False),
+    _=Depends(AdminOnly),
+    db: DBSession = Depends(get_db),
+):
+    """
+    Bulk-create timetable slots from the Excel/CSV template.
+    Required columns: Day, StartTime, EndTime, Branch, Section, Semester, SubjectCode
+    Optional columns: FacultyID (blank = free class like Library), Room, LabBatch, ClassType
+    """
+    filename = (file.filename or "").lower()
+    rows = []  # list of dicts, one per data row
+    raw = await file.read()
+
+    if filename.endswith(".csv"):
+        import csv
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+        reader = csv.reader(io.StringIO(text))
+        all_rows = list(reader)
+    elif filename.endswith(".xlsx"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(raw), data_only=True)
+        ws = wb.active
+        all_rows = [[c.value for c in row] for row in ws.iter_rows()]
+    else:
+        raise HTTPException(status_code=400, detail="Only .xlsx or .csv files are supported (.xls is not — save as .xlsx first).")
+
+    if not all_rows:
+        raise HTTPException(status_code=400, detail="File is empty.")
+
+    header = [str(h).strip() if h is not None else "" for h in all_rows[0]]
+    # Map header names to column index, case-insensitively
+    col_idx = {h.lower(): i for i, h in enumerate(header)}
+    required = ["day", "starttime", "endtime", "branch", "section", "semester", "subjectcode"]
+    missing = [r for r in required if r not in col_idx]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required column(s): {', '.join(missing)}. Expected headers: {', '.join(BULK_HEADERS)}")
+
+    def cell(row, name, default=""):
+        idx = col_idx.get(name)
+        if idx is None or idx >= len(row) or row[idx] is None:
+            return default
+        return str(row[idx]).strip()
+
+    # Pre-fetch courses/faculty once instead of querying per-row
+    all_courses = {c.code.upper(): c for c in db.query(Course).all()}
+    all_faculty = {f.inst_id.upper(): f for f in db.query(Faculty).all()}
+
+    touched_scopes = set()   # (branch, section, semester) combos seen — for clear_existing
+    to_create = []
+    errors = []
+
+    for i, raw_row in enumerate(all_rows[1:], start=2):  # row 1 = header
+        if not any(raw_row):
+            continue  # skip fully blank rows
+        day       = cell(raw_row, "day").lower()
+        start     = cell(raw_row, "starttime")
+        end       = cell(raw_row, "endtime")
+        branch    = cell(raw_row, "branch")
+        section   = cell(raw_row, "section")
+        semester  = cell(raw_row, "semester")
+        code      = cell(raw_row, "subjectcode").upper()
+        fac_id    = cell(raw_row, "facultyid")
+        room      = cell(raw_row, "room")
+        lab_batch = cell(raw_row, "labbatch")
+        ctype     = cell(raw_row, "classtype").lower()
+
+        if day not in DAYS:
+            errors.append(f"Row {i}: invalid day '{day}' (expected one of {', '.join(DAYS)})")
+            continue
+        if not re.match(r'^\d{1,2}:\d{2}$', start) or not re.match(r'^\d{1,2}:\d{2}$', end):
+            errors.append(f"Row {i}: invalid time format (expected HH:MM), got '{start}'-'{end}'")
+            continue
+        if not code or code not in all_courses:
+            errors.append(f"Row {i}: unknown subject code '{code}'")
+            continue
+        co = all_courses[code]
+
+        fac = None
+        if fac_id:
+            fac = all_faculty.get(fac_id.upper())
+            if not fac:
+                errors.append(f"Row {i}: unknown faculty ID '{fac_id}'")
+                continue
+
+        FREE_CODES = {"LIBRARY", "TINKERER", "MENTOR", "CODING", "FREE"}
+        is_free = code in FREE_CODES or co.credits == 0
+        if not fac and not is_free:
+            errors.append(f"Row {i}: no FacultyID given for '{code}' — either provide one or leave it for free-period subjects (Library, Tinkerer, etc.)")
+            continue
+
+        touched_scopes.add((branch.lower(), section.lower(), semester.lower()))
+        to_create.append(TimetableSlot(
+            course_id=co.code, faculty_id=(fac.inst_id if fac else None),
+            day_of_week=day, start_time=start, end_time=end,
+            room=room or None, branch=branch, section=section, semester=semester,
+            sub_section=lab_batch or None,
+            course_type=ctype if ctype in ("theory", "lab") else (co.course_type or "theory"),
+        ))
+
+    if clear_existing and touched_scopes:
+        for branch, section, semester in touched_scopes:
+            db.query(TimetableSlot).filter(
+                func.lower(TimetableSlot.branch) == branch,
+                func.lower(TimetableSlot.section) == section,
+                func.lower(TimetableSlot.semester) == semester,
+            ).delete(synchronize_session=False)
+
+    for slot in to_create:
+        db.add(slot)
+    db.commit()
+
+    return {"added": len(to_create), "errors": errors}
+
+
 # ── Go Live ───────────────────────────────────────────────────────────────────
 @router.post("/{slot_id}/go-live")
 def go_live(
