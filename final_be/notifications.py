@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from core.security import get_current_user, require_roles
 from db.database import get_db
-from models.models import User, UserRole, Session, SessionStatus
+from models.models import Student, UserRole, Session, SessionStatus
 
 router = APIRouter()
 
@@ -28,10 +28,10 @@ _push_subscriptions: dict[int, list[dict]] = {}
 @router.post("/push/subscribe", status_code=201)
 def subscribe_push(
     payload: PushSubscription,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
 ):
     """Save a push subscription for the current user."""
-    uid = current_user.id
+    uid = current_user.inst_id
     if uid not in _push_subscriptions:
         _push_subscriptions[uid] = []
     sub_dict = {"endpoint": payload.endpoint, "keys": payload.keys}
@@ -41,9 +41,9 @@ def subscribe_push(
     return {"message": "Subscribed to push notifications!"}
 
 @router.delete("/push/unsubscribe")
-def unsubscribe_push(current_user: User = Depends(get_current_user)):
+def unsubscribe_push(current_user = Depends(get_current_user)):
     """Remove all push subscriptions for current user."""
-    _push_subscriptions.pop(current_user.id, None)
+    _push_subscriptions.pop(current_user.inst_id, None)
     return {"message": "Unsubscribed from push notifications."}
 
 # ── Send push notification to a user ─────────────────────────────────────────
@@ -89,7 +89,7 @@ def send_push_to_user(user_id: str, title: str, body: str, url: str = "/"):
 @router.post("/notify/session-live/{session_id}")
 def notify_session_live(
     session_id: int,
-    current_user: User = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    current_user = Depends(require_roles(UserRole.faculty, UserRole.admin)),
     db: DBSession = Depends(get_db),
 ):
     """Notify all students in a section that a session has gone live."""
@@ -100,15 +100,15 @@ def notify_session_live(
         raise HTTPException(status_code=400, detail="Session is not active.")
 
     # Get students in this section
-    q = db.query(User).filter(User.role == UserRole.student, User.status == "active")
-    if session.branch:  q = q.filter(User.branch  == session.branch)
-    if session.section: q = q.filter(User.section == session.section)
+    q = db.query(Student).filter(Student.status == "active")
+    if session.branch:  q = q.filter(Student.branch  == session.branch)
+    if session.section: q = q.filter(Student.section == session.section)
     students = q.all()
 
     sent_count = 0
     for stu in students:
         sent = send_push_to_user(
-            user_id=stu.id,
+            user_id=stu.inst_id,
             title="Class Started!",
             body=f"{session.title} is now live. Mark your attendance now!",
             url="/",
@@ -131,7 +131,7 @@ class EmailPayload(BaseModel):
 @router.post("/email/send")
 def send_email(
     payload: EmailPayload,
-    _: User = Depends(require_roles(UserRole.admin)),
+    _ = Depends(require_roles(UserRole.admin)),
 ):
     """Send an email notification (admin only)."""
     GMAIL_USER = os.getenv("GMAIL_USER", "")
@@ -152,7 +152,7 @@ def notify_low_attendance(
     branch:    Optional[str] = None,
     section:   Optional[str] = None,
     threshold: int = 75,
-    _: User = Depends(require_roles(UserRole.admin)),
+    _ = Depends(require_roles(UserRole.admin)),
     db: DBSession = Depends(get_db),
 ):
     """Send email to all students below attendance threshold."""
@@ -161,9 +161,9 @@ def notify_low_attendance(
     if not GMAIL_USER or not GMAIL_PASS:
         raise HTTPException(status_code=503, detail="Email not configured.")
 
-    q = db.query(User).filter(User.role == UserRole.student, User.status == "active")
-    if branch:  q = q.filter(User.branch  == branch)
-    if section: q = q.filter(User.section == section)
+    q = db.query(Student).filter(Student.status == "active")
+    if branch:  q = q.filter(Student.branch  == branch)
+    if section: q = q.filter(Student.section == section)
     students = q.all()
 
     from models.models import AttendanceRecord
@@ -185,7 +185,7 @@ def notify_low_attendance(
             skipped += 1
             continue
         records = db.query(AttendanceRecord)\
-            .filter(AttendanceRecord.student_id == stu.id).all()
+            .filter(AttendanceRecord.student_id == stu.inst_id).all()
         present = sum(1 for r in records if r.status.value == "present")
         pct = round((present / total_sessions) * 100) if total_sessions else 0
         if pct < threshold:

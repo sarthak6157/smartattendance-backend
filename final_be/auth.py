@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from core.security import create_access_token, get_current_user, hash_password, verify_password
 from db.database import get_db
-from models.models import User, UserRole, UserStatus
+from models.models import Student, Faculty, Admin, ROLE_MODEL, UserRole, UserStatus
 from schemas.schemas import LoginRequest, PasswordChangeRequest, TokenResponse, UserCreate, UserOut, UserUpdate
 
 router = APIRouter()
@@ -33,8 +33,14 @@ def _check_rate_limit(ip: str):
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     _check_rate_limit(request.client.host)
     credential = payload.credential.strip()
-    user = db.query(User).filter(
-        (User.email == credential) | (User.inst_id == credential)
+    # Students/faculty/admins now live in three separate tables — the
+    # role tab the person picked on the login screen tells us which one
+    # to search, instead of scanning everyone.
+    model = ROLE_MODEL.get(payload.role)
+    if model is None:
+        raise HTTPException(status_code=400, detail="Invalid role.")
+    user = db.query(model).filter(
+        (model.email == credential) | (model.inst_id == credential)
     ).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials.")
@@ -46,24 +52,24 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     db.commit()
     # Clear rate limit on successful login
     _login_attempts.pop(request.client.host, None)
-    token = create_access_token({"sub": user.id, "role": user.role.value})
+    # inst_id — NOT the cosmetic id field — is the real identity/login key
+    token = create_access_token({"sub": user.inst_id, "role": user.role.value})
     return TokenResponse(access_token=token, user=UserOut.model_validate(user))
 
 
 @router.post("/register", response_model=UserOut, status_code=201)
 def register(payload: UserCreate, db: Session = Depends(get_db)):
-    """Public registration — always creates student, status=pending."""
-    existing = db.query(User).filter(
-        (User.inst_id == payload.inst_id) | (User.email == payload.email)
+    """Public registration — always creates a student, status=pending."""
+    existing = db.query(Student).filter(
+        (Student.inst_id == payload.inst_id) | (Student.email == payload.email)
     ).first()
     if existing:
         raise HTTPException(status_code=409, detail="User with this ID or email already exists.")
     dept = payload.department or payload.branch or ''
-    new_user = User(
+    new_user = Student(
         full_name=payload.full_name,
         inst_id=payload.inst_id,
         email=payload.email,
-        role=UserRole.student,
         status=UserStatus.pending,
         hashed_password=hash_password(payload.password),
         department=dept,
@@ -79,18 +85,24 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/me", response_model=UserOut)
-def me(current_user: User = Depends(get_current_user)):
+def me(current_user = Depends(get_current_user)):
     return current_user
 
 
 @router.patch("/me", response_model=UserOut)
 def update_me(
     payload: UserUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Not every field applies to every role (e.g. faculty/admin have no
+    # `section`) — those are stubbed as read-only properties on the model,
+    # so only assign fields that are real mapped columns for this user's
+    # table, and silently skip the rest instead of crashing.
+    real_columns = current_user.__table__.columns.keys()
     for field, value in payload.model_dump(exclude_none=True).items():
-        setattr(current_user, field, value)
+        if field in real_columns:
+            setattr(current_user, field, value)
     current_user.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(current_user)
@@ -100,7 +112,7 @@ def update_me(
 @router.post("/change-password", status_code=200)
 def change_password(
     payload: PasswordChangeRequest,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     if not verify_password(payload.current_password, current_user.hashed_password):
@@ -123,11 +135,16 @@ class AdminResetPwd(_AuthBM):
 def admin_reset_password(
     user_id: str,
     payload: AdminResetPwd,
-    current_admin: User = Depends(_req(_UR.admin)),
+    current_admin = Depends(_req(_UR.admin)),
     db: Session = Depends(get_db),
 ):
-    """Admin resets any user's password."""
-    user = db.query(User).filter(User.id == user_id).first()
+    """Admin resets any user's password — searches all three tables since
+    the id alone doesn't say which role it belongs to."""
+    user = None
+    for model in (Student, Faculty, Admin):
+        user = db.query(model).filter(model.inst_id == user_id).first()
+        if user:
+            break
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
     if len(payload.new_password) < 6:

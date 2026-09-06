@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from db.database import get_db
-from models.models import User
+from models.models import UserRole, ROLE_MODEL
 
 SECRET_KEY = os.getenv("SECRET_KEY", "SmartAttendance2025TMU@SecretKey#Sarthak")
 ALGORITHM  = "HS256"
@@ -38,22 +38,29 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         to_encode["sub"] = str(to_encode["sub"])
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         sub = payload.get("sub")
-        if sub is None:
+        role_str = payload.get("role")
+        if sub is None or role_str is None:
             raise HTTPException(status_code=401, detail="Could not validate credentials")
-        user_id = sub  # inst_id is now the primary key — it's a string, no int() cast
+        user_id = sub  # inst_id — the login credential, a string
+        role = UserRole(role_str)
     except (JWTError, ValueError, TypeError):
         raise HTTPException(status_code=401, detail="Could not validate credentials")
-    user = db.query(User).filter(User.id == user_id).first()
+    # Users now live in one of three separate tables (students/faculty/admins)
+    # — the JWT's role claim tells us which one to look in.
+    model = ROLE_MODEL.get(role)
+    if model is None:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+    user = db.query(model).filter(model.inst_id == user_id).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
 def require_roles(*roles):
-    def _check(current_user: User = Depends(get_current_user)):
+    def _check(current_user = Depends(get_current_user)):
         if current_user.role not in roles:
             raise HTTPException(status_code=403, detail="Permission denied")
         return current_user

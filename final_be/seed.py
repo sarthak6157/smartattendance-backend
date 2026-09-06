@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db.database import SessionLocal
-from models.models import User, UserRole, UserStatus, SystemSettings
+from models.models import Admin, UserStatus, SystemSettings
 from core.security import hash_password
 
 
@@ -37,16 +37,14 @@ def main():
 
     # ── 2. Admin account (only if not exists) ──
     try:
-        existing = db.query(User).filter(User.inst_id == "admin1").first()
+        existing = db.query(Admin).filter(Admin.inst_id == "admin1").first()
         if not existing:
-            db.add(User(
+            db.add(Admin(
                 full_name="System Admin",
                 inst_id="admin1",
                 email="admin@smartattendance.com",
-                role=UserRole.admin,
                 status=UserStatus.active,
                 hashed_password=hash_password("Pass@123"),
-                department="Administration",
             ))
             db.commit()
             print("Admin created → admin1 / Pass@123")

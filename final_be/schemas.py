@@ -1,6 +1,6 @@
 """Pydantic schemas v2 — branch, section, face, GPS."""
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Union
 from pydantic import BaseModel, EmailStr
 from models.models import AttendanceMethod, AttendanceStatus, SessionStatus, UserRole, UserStatus
 
@@ -8,6 +8,7 @@ from models.models import AttendanceMethod, AttendanceStatus, SessionStatus, Use
 class LoginRequest(BaseModel):
     credential: str
     password: str
+    role: UserRole   # which table to look in: student / faculty / admin
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -47,7 +48,10 @@ class FaceRegisterRequest(BaseModel):
     face_descriptor: Optional[str] = None  # JSON array of 128 floats from face-api.js
 
 class UserOut(BaseModel):
-    id: str
+    # "id" is now a purely cosmetic per-role display field — "ST006" for
+    # students, a plain serial number for faculty, absent (None) for admins.
+    # It is NEVER the login credential or a foreign key — that's inst_id.
+    id: Optional[Union[str, int]] = None
     full_name: str
     inst_id: str
     email: str
@@ -81,7 +85,7 @@ class CourseCreate(BaseModel):
     credits: int = 3
 
 class CourseOut(BaseModel):
-    id: int
+    id: str
     code: str
     name: str
     department:  Optional[str] = None
@@ -93,7 +97,7 @@ class CourseOut(BaseModel):
     model_config = {"from_attributes": True, "use_enum_values": True}
 
 class SessionCreate(BaseModel):
-    course_id: int
+    course_id: str
     title: Optional[str] = None
     location: Optional[str] = None
     scheduled_at: datetime
@@ -103,7 +107,7 @@ class SessionCreate(BaseModel):
 
 class SessionOut(BaseModel):
     id: int
-    course_id: int
+    course_id: str
     faculty_id: str
     timetable_id: Optional[int] = None
     title: Optional[str] = None

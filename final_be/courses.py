@@ -8,7 +8,7 @@ from sqlalchemy import func
 
 from core.security import get_current_user, require_roles
 from db.database import get_db
-from models.models import Course, User, UserRole
+from models.models import Course, UserRole
 from schemas.schemas import CourseCreate, CourseOut
 
 router   = APIRouter()
@@ -48,7 +48,7 @@ def detect_type(name: str) -> str:
 @router.get("", response_model=list[CourseOut])
 def list_courses(
     semester: Optional[str] = None,
-    _: User = Depends(get_current_user),
+    _ = Depends(get_current_user),
     db: DBSession = Depends(get_db)
 ):
     q = db.query(Course).order_by(Course.semester, Course.code)
@@ -61,7 +61,7 @@ def list_courses(
 @router.post("", response_model=CourseOut, status_code=201)
 def create_course(
     payload: CourseCreate,
-    _: User = Depends(AdminOnly),
+    _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db)
 ):
     code = payload.code.strip().upper()
@@ -85,7 +85,7 @@ def create_course(
 @router.post("/bulk-upload")
 async def bulk_upload_courses(
     file: UploadFile = File(...),
-    _: User = Depends(AdminOnly),
+    _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db),
 ):
     """
@@ -150,7 +150,7 @@ async def bulk_upload_courses(
 
 # ── Download Excel template ───────────────────────────────────────────────────
 @router.get("/template")
-def download_template(_: User = Depends(AdminOnly)):
+def download_template(_ = Depends(AdminOnly)):
     """Download Excel template for bulk course upload."""
     try:
         import openpyxl
@@ -206,7 +206,7 @@ def download_template(_: User = Depends(AdminOnly)):
 
 # ── Get courses grouped by semester ──────────────────────────────────────────
 @router.get("/by-semester")
-def courses_by_semester(_: User = Depends(get_current_user), db: DBSession = Depends(get_db)):
+def courses_by_semester(_ = Depends(get_current_user), db: DBSession = Depends(get_db)):
     """Return all courses grouped by semester — used by timetable builder."""
     courses = db.query(Course).order_by(Course.semester, Course.code).all()
     grouped = {}
@@ -223,7 +223,7 @@ def courses_by_semester(_: User = Depends(get_current_user), db: DBSession = Dep
 
 # ── Delete course ─────────────────────────────────────────────────────────────
 @router.delete("/{course_id}", status_code=204)
-def delete_course(course_id: int, _: User = Depends(AdminOnly), db: DBSession = Depends(get_db)):
+def delete_course(course_id: str, _ = Depends(AdminOnly), db: DBSession = Depends(get_db)):
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found.")
@@ -233,9 +233,9 @@ def delete_course(course_id: int, _: User = Depends(AdminOnly), db: DBSession = 
 # ── Update course ─────────────────────────────────────────────────────────────
 @router.patch("/{course_id}", response_model=CourseOut)
 def update_course(
-    course_id: int,
+    course_id: str,
     payload: CourseCreate,
-    _: User = Depends(AdminOnly),
+    _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db),
 ):
     course = db.query(Course).filter(Course.id == course_id).first()

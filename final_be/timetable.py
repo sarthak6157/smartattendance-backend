@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session as DBSession
 from core.security import get_current_user, require_roles
 from db.database import get_db
 from models.models import (TimetableSlot, Session, SessionStatus,
-                           User, UserRole, Course, DayOfWeek)
+                           Faculty, Student, Admin, UserRole, Course, DayOfWeek)
 
 router    = APIRouter()
 AdminOnly = require_roles(UserRole.admin)
@@ -30,7 +30,7 @@ DEFAULT_SLOTS = [
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 class SlotCreate(BaseModel):
-    course_id:   int
+    course_id:   str
     faculty_id:  Optional[str] = None   # optional for free classes
     day_of_week: str
     start_time:  str
@@ -44,7 +44,7 @@ class SlotCreate(BaseModel):
 
 class SlotOut(BaseModel):
     id:           int
-    course_id:    int
+    course_id:    str
     faculty_id:   Optional[str] = None
     day_of_week:  str
     start_time:   str
@@ -91,7 +91,7 @@ def list_slots(
     section:    Optional[str] = Query(None),
     semester:   Optional[str] = Query(None),
     faculty_id: Optional[str] = Query(None),
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     q = db.query(TimetableSlot).filter(TimetableSlot.is_active == True)
@@ -101,14 +101,14 @@ def list_slots(
         # etc.) too — these have no owning teacher, but any faculty needs to
         # be able to see and go-live them, otherwise attendance can never be
         # taken for a free period at all.
-        q = q.filter(or_(TimetableSlot.faculty_id == current_user.id, TimetableSlot.faculty_id == None))
+        q = q.filter(or_(TimetableSlot.faculty_id == current_user.inst_id, TimetableSlot.faculty_id == None))
     elif faculty_id:
         q = q.filter(TimetableSlot.faculty_id == faculty_id)
 
     if current_user.role == UserRole.student:
         effective_branch   = branch  or current_user.branch or current_user.department
         effective_section  = section or current_user.section
-        # Lab batch (e.g. "C1") lives in User.sub_section, NOT User.course
+        # Lab batch (e.g. "C1") lives in Student.sub_section, NOT Student.course
         # (course holds the degree type, e.g. "B.Tech"). Reading the wrong
         # field here meant effective_subsection was almost always empty,
         # which fell through to showing every batch's lab slots.
@@ -157,7 +157,7 @@ def list_slots(
     course_ids  = list({s.course_id  for s in slots})
     faculty_ids = list({s.faculty_id for s in slots})
     courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
-    faculty_map = {f.id: f for f in db.query(User).filter(User.id.in_(faculty_ids)).all()}
+    faculty_map = {f.inst_id: f for f in db.query(Faculty).filter(Faculty.inst_id.in_(faculty_ids)).all()}
 
     result = []
     for s in slots:
@@ -178,7 +178,7 @@ def get_timetable_grid(
     branch:   str = Query(...),
     section:  str = Query(...),
     semester: str = Query(...),
-    _: User = Depends(require_roles(UserRole.admin)),
+    _ = Depends(require_roles(UserRole.admin)),
     db: DBSession = Depends(get_db),
 ):
     """
@@ -196,7 +196,7 @@ def get_timetable_grid(
     course_ids  = list({s.course_id  for s in slots})
     faculty_ids = list({s.faculty_id for s in slots})
     courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()} if course_ids else {}
-    faculty_map = {f.id: f for f in db.query(User).filter(User.id.in_(faculty_ids)).all()} if faculty_ids else {}
+    faculty_map = {f.inst_id: f for f in db.query(Faculty).filter(Faculty.inst_id.in_(faculty_ids)).all()} if faculty_ids else {}
 
     grid = {day: {} for day in DAYS}
     for s in slots:
@@ -226,7 +226,7 @@ def get_timetable_grid(
 @router.post("", response_model=SlotOut, status_code=201)
 def create_slot(
     payload: SlotCreate,
-    _: User = Depends(AdminOnly),
+    _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db),
 ):
     co  = db.query(Course).filter(Course.id == payload.course_id).first()
@@ -238,7 +238,7 @@ def create_slot(
 
     fac = None
     if payload.faculty_id:
-        fac = db.query(User).filter(User.id == payload.faculty_id, User.role == UserRole.faculty).first()
+        fac = db.query(Faculty).filter(Faculty.inst_id == payload.faculty_id).first()
         if not fac:
             raise HTTPException(status_code=404, detail="Faculty not found.")
     elif not is_free:
@@ -262,7 +262,7 @@ def create_slot(
 def update_slot(
     slot_id: int,
     payload: SlotCreate,
-    _: User = Depends(AdminOnly),
+    _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db),
 ):
     slot = db.query(TimetableSlot).filter(TimetableSlot.id == slot_id).first()
@@ -276,7 +276,7 @@ def update_slot(
 
     fac = None
     if payload.faculty_id:
-        fac = db.query(User).filter(User.id == payload.faculty_id, User.role == UserRole.faculty).first()
+        fac = db.query(Faculty).filter(Faculty.inst_id == payload.faculty_id).first()
         if not fac:
             raise HTTPException(status_code=404, detail="Faculty not found.")
     elif not is_free:
@@ -297,7 +297,7 @@ def update_slot(
 
 # ── Delete slot ───────────────────────────────────────────────────────────────
 @router.delete("/{slot_id}", status_code=204)
-def delete_slot(slot_id: int, _: User = Depends(AdminOnly), db: DBSession = Depends(get_db)):
+def delete_slot(slot_id: int, _ = Depends(AdminOnly), db: DBSession = Depends(get_db)):
     slot = db.query(TimetableSlot).filter(TimetableSlot.id == slot_id).first()
     if not slot: raise HTTPException(status_code=404, detail="Slot not found.")
     db.delete(slot); db.commit()
@@ -307,7 +307,7 @@ def delete_slot(slot_id: int, _: User = Depends(AdminOnly), db: DBSession = Depe
 @router.post("/copy")
 def copy_timetable(
     payload: CopyTimetableRequest,
-    _: User = Depends(AdminOnly),
+    _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db),
 ):
     """Copy all slots from one section to another. Optionally copy teachers."""
@@ -329,9 +329,9 @@ def copy_timetable(
         func.lower(TimetableSlot.semester) == payload.to_semester.strip().lower(),
     ).delete(synchronize_session=False)
 
-    # Admin user id=1 as placeholder for unassigned
-    admin = db.query(User).filter(User.role == UserRole.admin).first()
-    placeholder_id = admin.id if admin else None
+    # No admin/faculty placeholder — an unassigned slot just has faculty_id=None,
+    # matching the free-period rule (faculty_id is nullable on TimetableSlot).
+    placeholder_id = None
 
     new_slots = []
     for s in slots:
@@ -366,7 +366,7 @@ def check_conflicts(
     branch:   Optional[str] = None,
     section:  Optional[str] = None,
     semester: Optional[str] = None,
-    _: User = Depends(AdminOnly),
+    _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db),
 ):
     """Check for teacher conflicts — same teacher at same time in different places."""
@@ -377,7 +377,7 @@ def check_conflicts(
     slots = q.all()
 
     faculty_ids = list({s.faculty_id for s in slots})
-    faculty_map = {f.id: f for f in db.query(User).filter(User.id.in_(faculty_ids)).all()}
+    faculty_map = {f.inst_id: f for f in db.query(Faculty).filter(Faculty.inst_id.in_(faculty_ids)).all()}
     course_ids  = list({s.course_id  for s in slots})
     courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
 
@@ -409,7 +409,7 @@ def check_conflicts(
 def go_live(
     slot_id: int,
     payload: GoLiveRequest,
-    current_user: User = Depends(require_roles(UserRole.faculty)),
+    current_user = Depends(require_roles(UserRole.faculty)),
     db: DBSession = Depends(get_db),
 ):
     import secrets
@@ -418,11 +418,11 @@ def go_live(
     # Free-period slots (Library, Coding Practice, etc.) have no assigned
     # teacher — any faculty can go live for them. Assigned slots still
     # require the owning faculty.
-    if slot.faculty_id is not None and slot.faculty_id != current_user.id:
+    if slot.faculty_id is not None and slot.faculty_id != current_user.inst_id:
         raise HTTPException(status_code=403, detail="This slot is not assigned to you.")
 
     active = db.query(Session).filter(
-        Session.faculty_id == current_user.id,
+        Session.faculty_id == current_user.inst_id,
         Session.status     == SessionStatus.active,
     ).first()
     if active:
@@ -461,7 +461,7 @@ def go_live(
         # Session.faculty_id is required (attendance/audit trail needs a
         # responsible person on record) — for a free period, that's whoever
         # actually went live, not the slot's (missing) assigned teacher.
-        faculty_id   = slot.faculty_id if slot.faculty_id is not None else current_user.id,
+        faculty_id   = slot.faculty_id if slot.faculty_id is not None else current_user.inst_id,
         timetable_id = slot.id,
         title        = f"{co.name if co else 'Class'} - {slot.section} {slot.start_time}",
         location     = slot.room,

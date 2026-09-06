@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session as DBSession
 from core.security import get_current_user, require_roles
 from db.database import get_db
 from models.models import (AttendanceMethod, AttendanceRecord, AttendanceStatus,
-                            Session, SessionStatus, SystemSettings, User, UserRole)
+                            Session, SessionStatus, SystemSettings, Student, UserRole)
 from schemas.schemas import AttendanceListOut, AttendanceMarkManual, AttendanceMarkQR, AttendanceOut
 
 router = APIRouter()
@@ -46,7 +46,7 @@ def check_edit_window(session: Session, db: DBSession):
 @router.post("/qr-gps-face", response_model=AttendanceOut, status_code=201)
 def mark_full_flow(
     payload: AttendanceMarkQR,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     session = db.query(Session).filter(
@@ -88,7 +88,7 @@ def mark_full_flow(
 
     existing = db.query(AttendanceRecord).filter(
         AttendanceRecord.session_id == session.id,
-        AttendanceRecord.student_id == current_user.id
+        AttendanceRecord.student_id == current_user.inst_id
     ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Attendance already marked.")
@@ -100,7 +100,7 @@ def mark_full_flow(
 
     record = AttendanceRecord(
         session_id  = session.id,
-        student_id  = current_user.id,
+        student_id  = current_user.inst_id,
         method      = AttendanceMethod.qr_gps_face,
         status      = att_status,
         student_lat = payload.student_lat,
@@ -113,7 +113,7 @@ def mark_full_flow(
 @router.post("/manual", response_model=AttendanceOut, status_code=201)
 def mark_manual(
     payload: AttendanceMarkManual,
-    current_user: User = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    current_user = Depends(require_roles(UserRole.faculty, UserRole.admin)),
     db: DBSession = Depends(get_db),
 ):
     session = db.query(Session).filter(Session.id == payload.session_id).first()
@@ -121,7 +121,7 @@ def mark_manual(
         raise HTTPException(status_code=404, detail="Session not found.")
 
     # Check faculty owns this session
-    if current_user.role == UserRole.faculty and session.faculty_id != current_user.id:
+    if current_user.role == UserRole.faculty and session.faculty_id != current_user.inst_id:
         raise HTTPException(status_code=403, detail="This session belongs to another faculty.")
 
     # Check 10-minute edit window
@@ -149,7 +149,7 @@ def mark_manual(
 @router.get("/session/{session_id}", response_model=AttendanceListOut)
 def session_attendance(
     session_id: int,
-    _: User = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    _ = Depends(require_roles(UserRole.faculty, UserRole.admin)),
     db: DBSession = Depends(get_db),
 ):
     records = db.query(AttendanceRecord).filter(AttendanceRecord.session_id == session_id).all()
@@ -159,12 +159,12 @@ def session_attendance(
 @router.get("/student/{student_id}", response_model=AttendanceListOut)
 def student_history(
     student_id: str,
-    course_id:  Optional[int] = None,
+    course_id:  Optional[str] = None,
     skip: int = 0, limit: int = 200,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    if current_user.role == UserRole.student and current_user.id != student_id:
+    if current_user.role == UserRole.student and current_user.inst_id != student_id:
         raise HTTPException(status_code=403, detail="Access denied.")
     q = db.query(AttendanceRecord).filter(AttendanceRecord.student_id == student_id)
     if course_id:
@@ -185,7 +185,7 @@ from models.models import Course
 def export_session_attendance(
     session_id: int,
     format: str = Query("excel", pattern="^(excel|csv)$"),
-    current_user: User = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    current_user = Depends(require_roles(UserRole.faculty, UserRole.admin)),
     db: DBSession = Depends(get_db),
 ):
     """Export attendance for a session as Excel or CSV."""
@@ -194,7 +194,7 @@ def export_session_attendance(
         raise HTTPException(status_code=404, detail="Session not found.")
 
     # Get all students in this section/branch
-    q = db.query(User).filter(User.role == UserRole.student, User.status == "active")
+    q = db.query(Student).filter(Student.status == "active")
     if session.branch:
         # Use flexible branch matching to handle format differences
         # e.g. "CSE(AI-ML-DL)" matches "B.Tech CSE (AI-ML-DL)"
@@ -204,15 +204,15 @@ def export_session_attendance(
         import re
         sb_core = re.sub(r'^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', sb, flags=re.IGNORECASE).strip()
         q = q.filter(
-            (func.lower(User.branch) == sb) |
-            (User.branch.ilike(f'%{sb_core}%')) |
-            (User.branch.ilike(f'%{sb}%')) |
-            (User.department.ilike(f'%{sb_core}%'))
+            (func.lower(Student.branch) == sb) |
+            (Student.branch.ilike(f'%{sb_core}%')) |
+            (Student.branch.ilike(f'%{sb}%')) |
+            (Student.department.ilike(f'%{sb_core}%'))
         )
     if session.section: q = q.filter(
-        func.lower(User.section) == session.section.strip().lower()
+        func.lower(Student.section) == session.section.strip().lower()
     )
-    students = q.order_by(User.full_name).all()
+    students = q.order_by(Student.full_name).all()
 
     # Get attendance records
     records = db.query(AttendanceRecord).filter(
@@ -225,7 +225,7 @@ def export_session_attendance(
 
     rows = []
     for i, stu in enumerate(students, 1):
-        rec = marked.get(stu.id)
+        rec = marked.get(stu.inst_id)
         rows.append({
             "S.No":           i,
             "Enrollment No.": stu.inst_id,
@@ -334,14 +334,14 @@ def export_session_attendance(
 def export_student_attendance(
     student_id: str,
     format: str = Query("excel", pattern="^(excel|csv)$"),
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     """Export a student's complete attendance record."""
-    if current_user.role == UserRole.student and current_user.id != student_id:
+    if current_user.role == UserRole.student and current_user.inst_id != student_id:
         raise HTTPException(status_code=403)
 
-    student = db.query(User).filter(User.id == student_id).first()
+    student = db.query(Student).filter(Student.inst_id == student_id).first()
     if not student: raise HTTPException(status_code=404)
 
     records = db.query(AttendanceRecord)\
@@ -447,14 +447,14 @@ def export_student_attendance(
 @router.get("/insights/student/{student_id}")
 def student_insights(
     student_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     """AI-style attendance insights for a student."""
-    if current_user.role == UserRole.student and current_user.id != student_id:
+    if current_user.role == UserRole.student and current_user.inst_id != student_id:
         raise HTTPException(status_code=403)
 
-    student = db.query(User).filter(User.id == student_id).first()
+    student = db.query(Student).filter(Student.inst_id == student_id).first()
     if not student: raise HTTPException(status_code=404)
 
     records = db.query(AttendanceRecord)\
@@ -585,26 +585,26 @@ def student_insights(
 def section_insights(
     branch:  Optional[str] = None,
     section: Optional[str] = None,
-    current_user: User = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    current_user = Depends(require_roles(UserRole.faculty, UserRole.admin)),
     db: DBSession = Depends(get_db),
 ):
     """AI insights for an entire section — identify at-risk students."""
-    q = db.query(User).filter(User.role == UserRole.student, User.status == "active")
+    q = db.query(Student).filter(Student.status == "active")
     if branch:
         import re as _re
         from sqlalchemy import func as _func, or_ as _or
         b_raw  = branch.strip()
         b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b_raw).strip()
         q = q.filter(_or(
-            User.branch.ilike(b_raw),
-            User.branch.ilike(f'%{b_core}%'),
-            User.branch.ilike(f'%{b_raw}%'),
-            User.department.ilike(f'%{b_core}%'),
+            Student.branch.ilike(b_raw),
+            Student.branch.ilike(f'%{b_core}%'),
+            Student.branch.ilike(f'%{b_raw}%'),
+            Student.department.ilike(f'%{b_core}%'),
         ))
     if section:
         from sqlalchemy import func as _func2, or_ as _or2
         q = q.filter(_or2(
-            _func2.upper(User.section) == section.strip().upper(),
+            _func2.upper(Student.section) == section.strip().upper(),
         ))
     students = q.all()
 
