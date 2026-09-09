@@ -80,7 +80,7 @@ def list_users(
     q = db.query(Model)
 
     if status_:          q = q.filter(Model.status == status_)
-    if branch and hasattr(Model, "branch"):
+    if branch and "branch" in Model.__table__.columns.keys():
         # Flexible match: "CSE(AI-ML-DL)" matches "B.Tech - CSE (AI-ML-DL)" and vice versa
         import re as _re
         b_raw  = branch.strip()
@@ -92,13 +92,13 @@ def list_users(
             Model.branch.ilike(f'%{b_raw}%'),
             Model.department.ilike(f'%{b_core}%'),
         ))
-    if section and hasattr(Model, "section"):
+    if section and "section" in Model.__table__.columns.keys():
         q = q.filter(Model.section == section)
-    if semester and hasattr(Model, "semester"):
+    if semester and "semester" in Model.__table__.columns.keys():
         q = q.filter(Model.semester == semester)
-    if course and hasattr(Model, "course"):
+    if course and "course" in Model.__table__.columns.keys():
         q = q.filter(Model.course.ilike(course))
-    if face_registered is not None and hasattr(Model, "face_registered"):
+    if face_registered is not None and "face_registered" in Model.__table__.columns.keys():
         q = q.filter(Model.face_registered == face_registered)
 
     if search:
@@ -154,11 +154,11 @@ def admin_create_user(payload: UserCreate, _=Depends(AdminOnly), db: Session = D
     )
     # Only pass fields the target table actually has — Admin doesn't have
     # department/branch/section/semester/course at all.
-    if hasattr(Model, "department"): kwargs["department"] = dept_val
-    if hasattr(Model, "branch"):     kwargs["branch"]      = payload.branch or payload.department or ''
-    if hasattr(Model, "section"):    kwargs["section"]     = payload.section
-    if hasattr(Model, "semester"):   kwargs["semester"]    = payload.semester
-    if hasattr(Model, "course"):     kwargs["course"]      = getattr(payload, 'course_type', None)
+    if "department" in Model.__table__.columns.keys(): kwargs["department"] = dept_val
+    if "branch" in Model.__table__.columns.keys():     kwargs["branch"]      = payload.branch or payload.department or ''
+    if "section" in Model.__table__.columns.keys():    kwargs["section"]     = payload.section
+    if "semester" in Model.__table__.columns.keys():   kwargs["semester"]    = payload.semester
+    if "course" in Model.__table__.columns.keys():     kwargs["course"]      = getattr(payload, 'course_type', None)
     new_user = Model(**kwargs)
     db.add(new_user); db.commit(); db.refresh(new_user)
     return new_user
