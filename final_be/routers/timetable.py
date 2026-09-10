@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, and_
 from sqlalchemy.orm import Session as DBSession
 
 from core.security import get_current_user, require_roles
@@ -97,11 +97,30 @@ def list_slots(
     q = db.query(TimetableSlot).filter(TimetableSlot.is_active == True)
 
     if current_user.role == UserRole.faculty:
-        # Include unassigned "free period" slots (Library, Coding Practice,
-        # etc.) too — these have no owning teacher, but any faculty needs to
-        # be able to see and go-live them, otherwise attendance can never be
-        # taken for a free period at all.
-        q = q.filter(or_(TimetableSlot.faculty_id == current_user.inst_id, TimetableSlot.faculty_id == None))
+        # Slots assigned to this faculty always show. Unassigned "free
+        # period" slots (Library, Coding Practice, Mentor Interaction, etc.)
+        # only show when they're genuinely global (no branch/section set —
+        # e.g. a school-wide Mentor Interaction period) or when they belong
+        # to a branch this faculty already teaches elsewhere. Previously
+        # every unassigned slot from every branch/section was shown to every
+        # faculty member, regardless of relevance.
+        my_branches = {
+            (b or '').strip().lower()
+            for (b,) in db.query(TimetableSlot.branch)
+                          .filter(TimetableSlot.faculty_id == current_user.inst_id)
+                          .distinct()
+        }
+        my_branches.discard('')
+        unassigned_conditions = [
+            TimetableSlot.branch == None,
+            TimetableSlot.branch == '',
+        ]
+        if my_branches:
+            unassigned_conditions.append(func.lower(TimetableSlot.branch).in_(my_branches))
+        q = q.filter(or_(
+            TimetableSlot.faculty_id == current_user.inst_id,
+            and_(TimetableSlot.faculty_id == None, or_(*unassigned_conditions)),
+        ))
     elif faculty_id:
         q = q.filter(TimetableSlot.faculty_id == faculty_id)
 
