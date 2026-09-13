@@ -17,6 +17,17 @@ from models.models import Student, Faculty, Admin, ROLE_MODEL, UserRole, UserSta
 from schemas.schemas import FaceRegisterRequest, UserCreate, UserListOut, UserOut, UserStatusUpdate, UserUpdate
 
 router = APIRouter()
+
+def _sanitize(value: str, max_len: int = 200) -> str:
+    """Strip dangerous characters and truncate input."""
+    if not value:
+        return value
+    # Remove null bytes and control characters
+    import re
+    value = re.sub(r'[--]', '', value)
+    # Truncate
+    return value.strip()[:max_len]
+
 AdminOnly      = require_roles(UserRole.admin)
 AdminOrFaculty = require_roles(UserRole.admin, UserRole.faculty)
 
@@ -109,8 +120,14 @@ def list_users(
             Model.inst_id.ilike(like)
         )
 
-    # Sorting — only apply if this table actually has the column
-    sort_col = getattr(Model, sort_by, None) or Model.created_at
+    # Sorting — only apply if this table actually has the column as a real,
+    # sortable mapped column. getattr(Model, sort_by) would otherwise return
+    # the stub `property` object for fields Admin/Faculty don't really have
+    # (e.g. Admin.branch), and calling .asc()/.desc() on that crashes.
+    if sort_by in Model.__table__.columns.keys():
+        sort_col = getattr(Model, sort_by)
+    else:
+        sort_col = Model.created_at
     q = q.order_by(sort_col.asc() if sort_dir == "asc" else sort_col.desc())
 
     total = q.count()

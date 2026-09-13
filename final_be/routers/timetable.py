@@ -377,15 +377,22 @@ def check_conflicts(
     if semester: q = q.filter(func.lower(TimetableSlot.semester) == semester.strip().lower())
     slots = q.all()
 
-    faculty_ids = list({s.faculty_id for s in slots})
-    faculty_map = {f.inst_id: f for f in db.query(Faculty).filter(Faculty.inst_id.in_(faculty_ids)).all()}
+    faculty_ids = list({s.faculty_id for s in slots if s.faculty_id})
+    faculty_map = {f.inst_id: f for f in db.query(Faculty).filter(Faculty.inst_id.in_(faculty_ids)).all()} if faculty_ids else {}
     course_ids  = list({s.course_id  for s in slots})
-    courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
+    courses_map = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()} if course_ids else {}
 
-    # Group by faculty + day + time
+    # Group by faculty + day + time — skip unassigned (faculty_id is None)
+    # slots entirely: multiple different free periods (Library in one
+    # section, unclaimed Mentor Interaction in another) can legitimately
+    # share the same day/time with no teacher assigned to either, and
+    # grouping them under the same "None" key would falsely report that
+    # as a conflict for a nonexistent teacher.
     from collections import defaultdict
     schedule = defaultdict(list)
     for s in slots:
+        if not s.faculty_id:
+            continue
         day = s.day_of_week.value if hasattr(s.day_of_week, "value") else str(s.day_of_week)
         key = (s.faculty_id, day, s.start_time)
         schedule[key].append(s)

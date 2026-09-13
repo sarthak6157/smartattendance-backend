@@ -617,7 +617,7 @@ def section_insights(
     at_risk, safe, critical = [], [], []
     for stu in students:
         records = db.query(AttendanceRecord)\
-            .filter(AttendanceRecord.student_id == stu.id).all()
+            .filter(AttendanceRecord.student_id == stu.inst_id).all()
         present = sum(1 for r in records if r.status.value == "present")
         pct = round((present / total_sessions) * 100) if total_sessions else 0
         entry = {"id": stu.id, "name": stu.full_name, "inst_id": stu.inst_id,

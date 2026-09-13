@@ -10,6 +10,25 @@ from starlette.requests import Request
 
 app = FastAPI(title="Smart Attendance System API", version="3.0.0")
 
+# ── Security Headers Middleware ──────────────────────────────────────────────
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        # Prevent clickjacking
+        response.headers["X-Frame-Options"] = "DENY"
+        # Prevent MIME type sniffing
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        # XSS protection
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        # HSTS (only for HTTPS)
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        # Referrer policy
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # Remove server header
+        response.headers.pop("server", None)
+        return response
+
+
 # ── Global exception handler — ensures CORS headers on ALL 500 errors ────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -45,6 +64,7 @@ EXTRA = os.getenv("EXTRA_ORIGINS", "")
 if EXTRA:
     ALLOWED_ORIGINS += [o.strip() for o in EXTRA.split(",") if o.strip()]
 
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

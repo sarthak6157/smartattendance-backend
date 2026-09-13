@@ -22,7 +22,7 @@ class PushSubscriptionRecord(BaseModel):
     subscription: dict
 
 # In-memory store for push subscriptions (replace with DB table in production)
-_push_subscriptions: dict[int, list[dict]] = {}
+_push_subscriptions: dict[str, list[dict]] = {}
 
 # ── Push subscription endpoints ───────────────────────────────────────────────
 @router.post("/push/subscribe", status_code=201)

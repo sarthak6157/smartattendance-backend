@@ -4,6 +4,7 @@ import secrets
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as DBSession
 
 from core.security import get_current_user, require_roles
@@ -35,19 +36,18 @@ def list_sessions(
     if status_:   q = q.filter(Session.status == status_)
     if branch:
         import re as _re
-        from sqlalchemy import func as _func, or_ as _or
         b_raw  = branch.strip()
         b_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', b_raw).strip()
-        q = q.filter(_or(
+        q = q.filter(or_(
             Session.branch == None, Session.branch == '',
             Session.branch.ilike(b_raw),
             Session.branch.ilike(f'%{b_core}%'),
             Session.branch.ilike(f'%{b_raw}%'),
         ))
     if section:
-        q = q.filter(_or(
+        q = q.filter(or_(
             Session.section == None, Session.section == '',
-            _func.upper(Session.section) == section.strip().upper(),
+            func.upper(Session.section) == section.strip().upper(),
         ))
     total    = q.count()
     sessions = q.order_by(Session.scheduled_at.desc()).offset(skip).limit(limit).all()
