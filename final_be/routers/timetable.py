@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, or_, and_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as DBSession
 
 from core.security import get_current_user, require_roles
@@ -97,30 +97,12 @@ def list_slots(
     q = db.query(TimetableSlot).filter(TimetableSlot.is_active == True)
 
     if current_user.role == UserRole.faculty:
-        # Slots assigned to this faculty always show. Unassigned "free
-        # period" slots (Library, Coding Practice, Mentor Interaction, etc.)
-        # only show when they're genuinely global (no branch/section set —
-        # e.g. a school-wide Mentor Interaction period) or when they belong
-        # to a branch this faculty already teaches elsewhere. Previously
-        # every unassigned slot from every branch/section was shown to every
-        # faculty member, regardless of relevance.
-        my_branches = {
-            (b or '').strip().lower()
-            for (b,) in db.query(TimetableSlot.branch)
-                          .filter(TimetableSlot.faculty_id == current_user.inst_id)
-                          .distinct()
-        }
-        my_branches.discard('')
-        unassigned_conditions = [
-            TimetableSlot.branch == None,
-            TimetableSlot.branch == '',
-        ]
-        if my_branches:
-            unassigned_conditions.append(func.lower(TimetableSlot.branch).in_(my_branches))
-        q = q.filter(or_(
-            TimetableSlot.faculty_id == current_user.inst_id,
-            and_(TimetableSlot.faculty_id == None, or_(*unassigned_conditions)),
-        ))
+        # Faculty only ever see classes actually assigned to them. Unassigned
+        # "free period" slots (Library, Mentor Interaction, etc.) are NOT
+        # shown here — a faculty claims a Mentor Interaction slot explicitly
+        # via POST /timetable/claim-mentor-slot, which assigns it to them
+        # directly, at which point it shows up like any other class.
+        q = q.filter(TimetableSlot.faculty_id == current_user.inst_id)
     elif faculty_id:
         q = q.filter(TimetableSlot.faculty_id == faculty_id)
 
@@ -579,6 +561,68 @@ async def bulk_import_timetable(
     db.commit()
 
     return {"added": len(to_create), "errors": errors}
+
+
+# ── Faculty: claim Mentor Interaction for their own section(s) ─────────────
+@router.post("/claim-mentor-slot")
+def claim_mentor_slot(
+    current_user = Depends(require_roles(UserRole.faculty)),
+    db: DBSession = Depends(get_db),
+):
+    """
+    A faculty member claims the 9:10-9:25 'Mentor Interaction' period for
+    every branch/section/semester they already teach (inferred from their
+    existing assigned slots) — creating a dedicated slot for each of their
+    weekday classes if one doesn't already exist there, or taking over an
+    unassigned one left by the admin's global bulk setup. Never touches a
+    slot another faculty has already claimed.
+    """
+    mentor_course = db.query(Course).filter(func.upper(Course.code) == "MENTOR").first()
+    if not mentor_course:
+        raise HTTPException(status_code=404, detail="No 'Mentor Interaction' course exists yet — ask an admin to set it up first (Timetable → Setup Mentor Interaction).")
+
+    my_scopes = db.query(TimetableSlot.branch, TimetableSlot.section, TimetableSlot.semester)\
+                  .filter(TimetableSlot.faculty_id == current_user.inst_id,
+                          TimetableSlot.branch  != None, TimetableSlot.branch  != "",
+                          TimetableSlot.section != None, TimetableSlot.section != "")\
+                  .distinct().all()
+    if not my_scopes:
+        raise HTTPException(status_code=400, detail="You don't have any assigned classes yet, so there's no section to set up Mentor Interaction for.")
+
+    claimed, created, skipped = [], [], []
+    for branch, section, semester in my_scopes:
+        label = f"{branch} - Sec {section} ({semester or 'all sem'})"
+        for day in DAYS:
+            existing = db.query(TimetableSlot).filter(
+                TimetableSlot.course_id == mentor_course.code,
+                TimetableSlot.day_of_week == day,
+                TimetableSlot.start_time == "09:10",
+                func.lower(TimetableSlot.branch)  == branch.strip().lower(),
+                func.lower(TimetableSlot.section) == section.strip().lower(),
+                func.lower(func.coalesce(TimetableSlot.semester, '')) == (semester or '').strip().lower(),
+            ).first()
+            if existing:
+                if existing.faculty_id and existing.faculty_id != current_user.inst_id:
+                    skipped.append(label)
+                    continue
+                existing.faculty_id = current_user.inst_id
+            else:
+                db.add(TimetableSlot(
+                    course_id=mentor_course.code, faculty_id=current_user.inst_id,
+                    day_of_week=day, start_time="09:10", end_time="09:25",
+                    branch=branch, section=section, semester=semester,
+                    course_type="activity",
+                ))
+                created.append(day)
+        if label not in skipped:
+            claimed.append(label)
+
+    db.commit()
+    return {
+        "claimed_sections": claimed,
+        "skipped_sections": list(set(skipped)),
+        "slots_created": len(created),
+    }
 
 
 # ── Go Live ───────────────────────────────────────────────────────────────────
