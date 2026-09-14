@@ -3,7 +3,16 @@ from datetime import datetime
 import enum
 from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship, synonym
-from db.database import Base
+from db.database import Base, DB_SCHEMA
+
+def _fk(table_dot_column: str) -> str:
+    """Build a ForeignKey target, schema-qualified only when DB_SCHEMA is
+    set (real Postgres/Supabase). BUG FIX: these were all hardcoded as
+    "public.xxx" strings, which — like the __table_args__ schema below —
+    broke every relationship on the SQLite fallback with
+    'no such table: public.courses' etc. On SQLite (DB_SCHEMA is None)
+    this now just returns "xxx" unqualified."""
+    return f"{DB_SCHEMA}.{table_dot_column}" if DB_SCHEMA else table_dot_column
 
 
 class UserRole(str, enum.Enum):
@@ -42,7 +51,7 @@ class DayOfWeek(str, enum.Enum):
 
 class Student(Base):
     __tablename__  = "students"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": DB_SCHEMA}
     # inst_id (e.g. "TCA023") is the primary key AND the only login credential.
     # `id` here is a SEPARATE, purely cosmetic field ("ST006"-style) — it is
     # NOT used for login, FKs, or identity anywhere in the code. Don't reuse
@@ -78,7 +87,7 @@ class Student(Base):
 
 class Faculty(Base):
     __tablename__  = "faculty"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": DB_SCHEMA}
     # inst_id (e.g. "TMU003") is the primary key AND login credential.
     # `id` is a SEPARATE plain serial number ("Sno.") — cosmetic only, not
     # used for login, FKs, or identity anywhere.
@@ -111,7 +120,7 @@ class Faculty(Base):
 
 class Admin(Base):
     __tablename__  = "admins"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": DB_SCHEMA}
     inst_id         = Column(String(50), primary_key=True, unique=True, nullable=False, index=True)
     full_name       = Column(String(120), nullable=False)
     email           = Column(String(150), unique=True, nullable=False, index=True)
@@ -146,7 +155,7 @@ ROLE_MODEL = {
 
 class Course(Base):
     __tablename__  = "courses"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": DB_SCHEMA}
     # code (e.g. "EAS211") is now the REAL primary key. `id` is kept as a
     # synonym for the same column so the rest of the codebase (Course.id,
     # course.id, etc.) keeps working unchanged.
@@ -167,10 +176,10 @@ class Course(Base):
 class TimetableSlot(Base):
     """A recurring weekly class slot — created by admin."""
     __tablename__  = "timetable_slots"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": DB_SCHEMA}
     id          = Column(Integer, primary_key=True, index=True)
-    course_id   = Column(String(20), ForeignKey("public.courses.code"), nullable=False)
-    faculty_id  = Column(String(50), ForeignKey("public.faculty.inst_id"), nullable=True)   # nullable for free classes (Library, Tinkerer etc.)
+    course_id   = Column(String(20), ForeignKey(_fk("courses.code")), nullable=False)
+    faculty_id  = Column(String(50), ForeignKey(_fk("faculty.inst_id")), nullable=True)   # nullable for free classes (Library, Tinkerer etc.)
     day_of_week = Column(Enum(DayOfWeek), nullable=False)   # Monday–Saturday
     start_time  = Column(String(10), nullable=False)         # "09:00"
     end_time    = Column(String(10), nullable=False)         # "10:00"
@@ -190,11 +199,11 @@ class TimetableSlot(Base):
 class Session(Base):
     """A live attendance session — created from a timetable slot."""
     __tablename__  = "sessions"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": DB_SCHEMA}
     id            = Column(Integer, primary_key=True, index=True)
-    course_id     = Column(String(20), ForeignKey("public.courses.code"), nullable=False)
-    faculty_id    = Column(String(50), ForeignKey("public.faculty.inst_id"), nullable=False)
-    timetable_id  = Column(Integer, ForeignKey("public.timetable_slots.id"), nullable=True)
+    course_id     = Column(String(20), ForeignKey(_fk("courses.code")), nullable=False)
+    faculty_id    = Column(String(50), ForeignKey(_fk("faculty.inst_id")), nullable=False)
+    timetable_id  = Column(Integer, ForeignKey(_fk("timetable_slots.id")), nullable=True)
     title         = Column(String(200), nullable=True)
     qr_token      = Column(String(200), unique=True, nullable=True)
     location      = Column(String(200), nullable=True)
@@ -222,11 +231,11 @@ class AttendanceRecord(Base):
     __tablename__  = "attendance_records"
     __table_args__ = (
         UniqueConstraint("session_id", "student_id", name="uq_session_student"),
-        {"schema": "public"}
+        {"schema": DB_SCHEMA}
     )
     id          = Column(Integer, primary_key=True, index=True)
-    session_id  = Column(Integer, ForeignKey("public.sessions.id", ondelete="CASCADE"), nullable=False)
-    student_id  = Column(String(50), ForeignKey("public.students.inst_id"), nullable=False)
+    session_id  = Column(Integer, ForeignKey(_fk("sessions.id"), ondelete="CASCADE"), nullable=False)
+    student_id  = Column(String(50), ForeignKey(_fk("students.inst_id")), nullable=False)
     method      = Column(Enum(AttendanceMethod), default=AttendanceMethod.qr)
     status      = Column(Enum(AttendanceStatus), default=AttendanceStatus.present)
     marked_at   = Column(DateTime, default=datetime.utcnow)
@@ -240,7 +249,7 @@ class AttendanceRecord(Base):
 
 class SystemSettings(Base):
     __tablename__  = "system_settings"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": DB_SCHEMA}
     id            = Column(Integer, primary_key=True, default=1)
     gps_range     = Column(Integer, default=50)
     face_required = Column(Boolean, default=True)

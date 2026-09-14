@@ -200,6 +200,12 @@ def create_extra_class(
     Session is immediately ACTIVE with a QR code.
     Not permanently added to timetable.
     """
+    # BUG FIX: course_id was never checked before insert — a bad/typo'd
+    # course_id hit Session's foreign key at commit time and surfaced as
+    # an unhandled 500 instead of a clear error.
+    from models.models import Course
+    if not db.query(Course).filter(Course.id == payload.course_id).first():
+        raise HTTPException(status_code=404, detail=f"Course '{payload.course_id}' not found.")
     now = datetime.utcnow()
     s = Session(
         course_id     = payload.course_id,

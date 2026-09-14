@@ -18,6 +18,12 @@ def get_database_url():
 
 DATABASE_URL = get_database_url()
 
+# Shared with models.py: every model explicitly sets
+# __table_args__ = {"schema": DB_SCHEMA} — None on SQLite (no such concept
+# there), "public" on real Postgres/Supabase. Setting schema=None is a
+# valid, meaningful SQLAlchemy value (equivalent to no schema at all).
+DB_SCHEMA = None if "sqlite" in DATABASE_URL else "public"
+
 def create_db_engine():
     url = get_database_url()
     if "sqlite" in url:
@@ -61,7 +67,13 @@ def set_search_path(dbapi_connection, connection_record):
 
 # Use MetaData with schema="public" so SQLAlchemy resolves ForeignKeys
 # correctly at import time — fixes "could not find table sessions" error
-metadata = MetaData(schema="public")
+# on Postgres/Supabase. BUG FIX: SQLite has no concept of a "public"
+# schema — every single query on the SQLite fallback (used automatically
+# whenever DATABASE_URL isn't set, e.g. local dev) failed with
+# "no such table: public.students" etc. because SQLAlchemy prefixed every
+# table name with a schema that doesn't exist there. Only qualify the
+# schema for real Postgres connections.
+metadata = MetaData(schema=DB_SCHEMA)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base(metadata=metadata)
 

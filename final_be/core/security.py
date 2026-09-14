@@ -1,5 +1,5 @@
 """Security: JWT, password hashing, role guards."""
-import os
+import os, warnings
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import Depends, HTTPException
@@ -10,7 +10,27 @@ from sqlalchemy.orm import Session
 from db.database import get_db
 from models.models import UserRole, ROLE_MODEL
 
-SECRET_KEY = os.getenv("SECRET_KEY", "SmartAttendance2025TMU@SecretKey#Sarthak")
+_FALLBACK_SECRET = "SmartAttendance2025TMU@SecretKey#Sarthak"
+SECRET_KEY = os.getenv("SECRET_KEY", _FALLBACK_SECRET)
+if SECRET_KEY == _FALLBACK_SECRET:
+    # BUG FIX: previously this fallback was silent. Anyone who reads this
+    # (public) source code now knows the exact key used to sign every JWT
+    # on any deployment that forgot to set SECRET_KEY — they could forge
+    # valid admin tokens. Keeping the fallback so existing deployments
+    # don't break on upgrade, but making it impossible to miss in logs.
+    warnings.warn(
+        "SECURITY WARNING: SECRET_KEY env var is not set — using the "
+        "hardcoded fallback key from source. Anyone who has read this "
+        "code can forge login tokens for ANY account, including admin. "
+        "Set a random SECRET_KEY in your deployment environment ASAP "
+        "(e.g. `python -c \"import secrets; print(secrets.token_hex(32))\"`).",
+        stacklevel=1,
+    )
+    print("=" * 70)
+    print("⚠️  SECURITY WARNING: SECRET_KEY not set — using an insecure")
+    print("   default that is visible in the source code. Set SECRET_KEY")
+    print("   in your environment before going to production.")
+    print("=" * 70)
 ALGORITHM  = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 

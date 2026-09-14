@@ -19,14 +19,23 @@ from schemas.schemas import FaceRegisterRequest, UserCreate, UserListOut, UserOu
 router = APIRouter()
 
 def _sanitize(value: str, max_len: int = 200) -> str:
-    """Strip dangerous characters and truncate input."""
+    """Strip control/non-printable characters and truncate input.
+    BUG FIX: this was previously defined with raw literal control bytes
+    pasted directly into the regex character class (invisible in a normal
+    editor, fragile, and never actually called anywhere) - rewritten with
+    plain \\xNN escapes and now actually used on free-text fields we store
+    and later render back into admin/faculty dashboards."""
     if not value:
         return value
-    # Remove null bytes and control characters
     import re
-    value = re.sub(r'[--]', '', value)
-    # Truncate
+    value = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', value)
     return value.strip()[:max_len]
+
+# Fields a user is allowed to change about THEMSELVES via PATCH /users/{id}
+# or PATCH /auth/me. Academic-placement fields (branch/section/semester/
+# course/department) are admin-only - see update_user() below and the
+# matching guard in routers/auth.py's update_me().
+SELF_EDITABLE_FIELDS = {"full_name", "email"}
 
 AdminOnly      = require_roles(UserRole.admin)
 AdminOrFaculty = require_roles(UserRole.admin, UserRole.faculty)
@@ -132,7 +141,19 @@ def list_users(
 
     total = q.count()
     users = q.offset(skip).limit(limit).all()
-    return {"total": total, "users": users}
+    # BUG FIX: UserOut includes the raw face_embedding (a 128-float
+    # biometric template) — this endpoint was shipping every listed
+    # student's face data to any faculty member's browser even though
+    # faculty never need it (face matching happens client-side, only the
+    # student's own browser needs their own embedding). Strip it from
+    # every record except the caller's own.
+    out_users = []
+    for u in users:
+        uo = UserOut.model_validate(u)
+        if u.inst_id != caller.inst_id:
+            uo.face_embedding = None
+        out_users.append(uo)
+    return {"total": total, "users": out_users}
 
 
 @router.get("/filter-options")
@@ -165,7 +186,7 @@ def admin_create_user(payload: UserCreate, _=Depends(AdminOnly), db: Session = D
     dept_val = payload.department or payload.branch or ''
     Model = ROLE_MODEL[payload.role]
     kwargs = dict(
-        full_name=payload.full_name, inst_id=payload.inst_id, email=payload.email,
+        full_name=_sanitize(payload.full_name, 200), inst_id=payload.inst_id, email=payload.email,
         status=UserStatus.active,
         hashed_password=hash_password(payload.password),
     )
@@ -187,7 +208,12 @@ def get_user(user_id: str, current_user=Depends(get_current_user), db: Session =
         raise HTTPException(status_code=403, detail="Access denied.")
     user = _find_user_anywhere(db, user_id)
     if not user: raise HTTPException(status_code=404, detail="User not found.")
-    return user
+    # Same face_embedding privacy fix as list_users() — an admin looking up
+    # someone else's record doesn't need their raw biometric template either.
+    uo = UserOut.model_validate(user)
+    if user.inst_id != current_user.inst_id:
+        uo.face_embedding = None
+    return uo
 
 
 @router.patch("/{user_id}", response_model=UserOut)
@@ -197,6 +223,13 @@ def update_user(user_id: str, payload: UserUpdate, current_user=Depends(get_curr
     user = _find_user_anywhere(db, user_id)
     if not user: raise HTTPException(status_code=404, detail="User not found.")
     data = payload.model_dump(exclude_none=True)
+    # BUG FIX: same self-escalation gap as /auth/me — a non-admin hitting
+    # their own record here could otherwise set branch/section/semester/
+    # course/department on themselves. Admins editing SOMEONE ELSE still
+    # get the full field set; a user editing themselves only gets contact
+    # fields.
+    if current_user.role != UserRole.admin:
+        data = {k: v for k, v in data.items() if k in SELF_EDITABLE_FIELDS}
     real_columns = user.__table__.columns.keys()
     for field, value in data.items():
         if field in real_columns:
@@ -308,7 +341,7 @@ async def bulk_import_students(
 
         try:
             new_user = Student(
-                full_name       = name,
+                full_name       = _sanitize(name, 200),
                 inst_id         = inst_id,
                 email           = email,
                 status          = UserStatus.active,

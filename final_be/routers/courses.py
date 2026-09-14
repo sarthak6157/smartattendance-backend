@@ -227,6 +227,21 @@ def delete_course(course_id: str, _ = Depends(AdminOnly), db: DBSession = Depend
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found.")
+    # BUG FIX: TimetableSlot.course_id and Session.course_id are foreign
+    # keys to Course with no ON DELETE rule, so deleting a course that
+    # still has timetable slots or sessions raised an unhandled
+    # IntegrityError — a raw 500 leaking DB internals to the client
+    # (see also the main.py exception-handler fix). Check up front and
+    # give a clear, actionable message instead.
+    from models.models import TimetableSlot, Session as SessionModel
+    in_use_slots = db.query(TimetableSlot).filter(TimetableSlot.course_id == course.code).count()
+    in_use_sessions = db.query(SessionModel).filter(SessionModel.course_id == course.code).count()
+    if in_use_slots or in_use_sessions:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Cannot delete {course.code}: it's used in {in_use_slots} timetable slot(s) "
+                     f"and {in_use_sessions} session(s). Remove those first.")
+        )
     db.delete(course); db.commit()
 
 
@@ -240,8 +255,15 @@ def update_course(
 ):
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course: raise HTTPException(status_code=404, detail="Course not found.")
+    # BUG FIX: this silently dropped department/branch/section/semester —
+    # editing a course in the admin UI to change any of those had no
+    # effect at all; only name/credits/course_type were ever saved.
     course.name        = payload.name
     course.credits     = payload.credits if payload.credits is not None else course.credits
     course.course_type = payload.course_type or course.course_type
+    if payload.department is not None: course.department = payload.department
+    if payload.branch     is not None: course.branch     = payload.branch
+    if payload.section    is not None: course.section    = payload.section
+    if payload.semester   is not None: course.semester   = payload.semester
     db.commit(); db.refresh(course)
     return course

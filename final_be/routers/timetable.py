@@ -123,15 +123,19 @@ def list_slots(
         eb      = effective_branch.strip().lower()
         eb_core = extract_core(eb)
         eb_short = eb_core.split("(")[0].strip() if eb_core else ""
+        # BUG FIX: func.strpos() is Postgres-only — this whole query 500'd
+        # on the SQLite fallback used when DATABASE_URL isn't set (e.g.
+        # local dev). Same substring-match semantics via LIKE, which both
+        # Postgres and SQLite support.
+        lower_branch = func.lower(TimetableSlot.branch)
         conditions = [
             TimetableSlot.branch == None,
             TimetableSlot.branch == "",
-            func.lower(TimetableSlot.branch) == eb,
-            func.strpos(func.lower(TimetableSlot.branch), eb) > 0,
-            func.strpos(eb, func.lower(TimetableSlot.branch)) > 0,
+            lower_branch == eb,
+            lower_branch.like(f"%{eb}%"),
         ]
-        if eb_core:  conditions.append(func.strpos(func.lower(TimetableSlot.branch), eb_core) > 0)
-        if eb_short: conditions.append(func.strpos(func.lower(TimetableSlot.branch), eb_short) > 0)
+        if eb_core:  conditions.append(lower_branch.like(f"%{eb_core}%"))
+        if eb_short: conditions.append(lower_branch.like(f"%{eb_short}%"))
         q = q.filter(or_(*conditions))
 
     if effective_section:

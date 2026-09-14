@@ -36,18 +36,35 @@ def main():
         db.rollback()
 
     # ── 2. Admin account (only if not exists) ──
+    # BUG FIX: this used to always seed the same hardcoded admin1/Pass@123
+    # on every fresh deployment, with no visibility beyond a startup log
+    # line — anyone who has read this (public) source now knows the
+    # default admin login for any TMU Smart Attendance instance that
+    # hasn't been changed yet. Now configurable via env vars so a new
+    # deployment can set its own admin credentials from day one; falls
+    # back to the old default for backward compatibility with instances
+    # that already seeded admin1, but prints a loud warning either way.
+    admin_inst_id = os.getenv("ADMIN_INST_ID", "admin1")
+    admin_email   = os.getenv("ADMIN_EMAIL", "admin@smartattendance.com")
+    admin_password= os.getenv("ADMIN_PASSWORD", "Pass@123")
     try:
-        existing = db.query(Admin).filter(Admin.inst_id == "admin1").first()
+        existing = db.query(Admin).filter(Admin.inst_id == admin_inst_id).first()
         if not existing:
             db.add(Admin(
                 full_name="System Admin",
-                inst_id="admin1",
-                email="admin@smartattendance.com",
+                inst_id=admin_inst_id,
+                email=admin_email,
                 status=UserStatus.active,
-                hashed_password=hash_password("Pass@123"),
+                hashed_password=hash_password(admin_password),
             ))
             db.commit()
-            print("Admin created → admin1 / Pass@123")
+            print(f"Admin created → {admin_inst_id} / (password set from ADMIN_PASSWORD env, or default if unset)")
+            if not os.getenv("ADMIN_PASSWORD"):
+                print("=" * 70)
+                print("⚠️  SECURITY WARNING: using the default seed password. Set")
+                print("   ADMIN_INST_ID / ADMIN_EMAIL / ADMIN_PASSWORD env vars and log")
+                print("   in to change it, or change it immediately via the admin panel.")
+                print("=" * 70)
         else:
             print("Admin already exists.")
     except Exception as e:

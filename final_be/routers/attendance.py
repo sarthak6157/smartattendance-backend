@@ -56,6 +56,31 @@ def mark_full_flow(
     if not session:
         raise HTTPException(status_code=404, detail="Invalid or expired QR code.")
 
+    # BUG FIX: branch/section were only ever enforced in the *listing*
+    # endpoints (sessions/active, sessions/active/mine) for display
+    # purposes — the actual marking endpoint never checked them. That
+    # meant any logged-in student who got hold of a QR token (screenshot,
+    # forwarded link, wrong WhatsApp group) could mark themselves present
+    # in a class for a completely different branch/section, since only
+    # the QR token + GPS were checked here. Apply the same flexible
+    # branch/section match used everywhere else in the codebase; a
+    # session with no branch/section set (e.g. an ad-hoc extra class) is
+    # still open to everyone, matching existing behaviour elsewhere.
+    if session.branch:
+        import re as _re
+        student_branch = (current_user.branch or getattr(current_user, "department", "") or "").strip()
+        if not student_branch:
+            raise HTTPException(status_code=403, detail="This session is for a specific branch and your profile has no branch set. Contact admin.")
+        sb = session.branch.strip().lower()
+        ub = student_branch.lower()
+        sb_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', sb).strip()
+        if not (ub == sb or sb_core in ub or ub in sb or sb in ub):
+            raise HTTPException(status_code=403, detail="This session is for a different branch than yours.")
+    if session.section:
+        student_section = (current_user.section or "").strip().upper()
+        if student_section != session.section.strip().upper():
+            raise HTTPException(status_code=403, detail="This session is for a different section than yours.")
+
     # Sub-section check — if session has a sub_section set (lab batch),
     # only students whose course matches that sub_section can mark attendance
     if session.sub_section:
@@ -126,6 +151,14 @@ def mark_manual(
 
     # Check 10-minute edit window
     check_edit_window(session, db)
+
+    # BUG FIX: previously nothing checked that payload.student_id was a
+    # real student before inserting — a typo'd enrollment number would
+    # hit the AttendanceRecord.student_id foreign key constraint at
+    # commit time, raise an unhandled IntegrityError, and surface as a
+    # raw 500 (see also the main.py exception-handler fix).
+    if not db.query(Student).filter(Student.inst_id == payload.student_id).first():
+        raise HTTPException(status_code=404, detail=f"No student found with ID {payload.student_id}.")
 
     existing = db.query(AttendanceRecord).filter(
         AttendanceRecord.session_id == payload.session_id,

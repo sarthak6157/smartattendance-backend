@@ -1,6 +1,8 @@
 """Smart Attendance System — FastAPI Backend"""
-import sys, os
+import sys, os, logging, traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+logger = logging.getLogger("smart_attendance")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,17 +27,29 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Referrer policy
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         # Remove server header
-        response.headers.pop("server", None)
+        # BUG FIX (critical): MutableHeaders in the Starlette version this
+        # app installs (pulled in by fastapi==0.115.5) has no .pop() method
+        # at all — this line raised AttributeError on every single request,
+        # which Starlette then turned into a 500. del is idempotent (a
+        # no-op if the header isn't present), so this is safe either way.
+        del response.headers["server"]
         return response
 
 
 # ── Global exception handler — ensures CORS headers on ALL 500 errors ────────
+# BUG FIX: this used to put str(exc) straight into the response body, which
+# leaks internals to any client — DB connection strings, table/column names,
+# file paths, third-party library errors, etc. The full traceback is still
+# logged server-side (visible in Render/Supabase logs) for debugging; the
+# client only ever gets a generic message.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled exception on %s %s:\n%s", request.method, request.url.path,
+                 "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     origin = request.headers.get("origin", "*")
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal server error: {str(exc)}"},
+        content={"detail": "Internal server error. Please try again or contact support if it persists."},
         headers={
             "Access-Control-Allow-Origin":      origin,
             "Access-Control-Allow-Credentials": "true",

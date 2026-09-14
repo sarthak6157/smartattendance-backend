@@ -5,6 +5,7 @@ from time import time
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from core.security import create_access_token, get_current_user, hash_password, verify_password
+from routers.users import _sanitize, SELF_EDITABLE_FIELDS
 from db.database import get_db
 from models.models import Student, Faculty, Admin, ROLE_MODEL, UserRole, UserStatus
 from schemas.schemas import LoginRequest, PasswordChangeRequest, TokenResponse, UserCreate, UserOut, UserUpdate
@@ -67,7 +68,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="User with this ID or email already exists.")
     dept = payload.department or payload.branch or ''
     new_user = Student(
-        full_name=payload.full_name,
+        full_name=_sanitize(payload.full_name, 200),
         inst_id=payload.inst_id,
         email=payload.email,
         status=UserStatus.pending,
@@ -95,12 +96,33 @@ def update_me(
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # BUG FIX: this used to apply every field in UserUpdate blindly, which
+    # includes branch/section/semester/course/department — i.e. a student
+    # could PATCH /auth/me and move themselves into a different class,
+    # section, or semester with no admin involvement at all (this would
+    # then let them see/mark attendance for classes they were never
+    # enrolled in). Only admin-managed academic-placement fields go
+    # through users.py's admin-only endpoints now; a user editing their
+    # own profile can only touch simple contact-info fields (imported from
+    # routers.users so both endpoints share one definition).
+    data = payload.model_dump(exclude_none=True)
+    if "full_name" in data:
+        data["full_name"] = _sanitize(data["full_name"], 200)
+    if current_user.role != UserRole.admin:
+        blocked = set(data) - SELF_EDITABLE_FIELDS
+        data = {k: v for k, v in data.items() if k in SELF_EDITABLE_FIELDS}
+        if blocked:
+            # Not fatal — just ignore the fields the user isn't allowed to
+            # change themselves, same as the pre-existing "unknown column"
+            # skip behaviour below, so the request doesn't hard-fail on
+            # what's usually a client sending its full local profile object.
+            pass
     # Not every field applies to every role (e.g. faculty/admin have no
     # `section`) — those are stubbed as read-only properties on the model,
     # so only assign fields that are real mapped columns for this user's
     # table, and silently skip the rest instead of crashing.
     real_columns = current_user.__table__.columns.keys()
-    for field, value in payload.model_dump(exclude_none=True).items():
+    for field, value in data.items():
         if field in real_columns:
             setattr(current_user, field, value)
     current_user.updated_at = datetime.utcnow()
