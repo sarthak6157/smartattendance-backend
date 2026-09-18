@@ -4,12 +4,17 @@ from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session as DBSession
+from sqlalchemy.exc import IntegrityError
 
-from core.security import get_current_user, require_roles
+from core.security import (get_current_user, require_roles, verify_qr_payload,
+                            build_qr_payload, face_descriptor_matches)
 from db.database import get_db
-from models.models import (AttendanceMethod, AttendanceRecord, AttendanceStatus,
-                            Session, SessionStatus, SystemSettings, Student, UserRole)
-from schemas.schemas import AttendanceListOut, AttendanceMarkManual, AttendanceMarkQR, AttendanceOut
+from models.models import (AttendanceAuditLog, AttendanceFlag, AttendanceMethod,
+                            AttendanceRecord, AttendanceStatus, DeviceCheckin,
+                            LeaveRequest, Session, SessionStatus, SystemSettings,
+                            Student, UserRole)
+from schemas.schemas import (AttendanceFlagOut, AttendanceListOut, AttendanceMarkManual,
+                              AttendanceMarkQR, AttendanceOut, DefaulterOut, FlagResolveRequest)
 
 router = APIRouter()
 
@@ -43,18 +48,91 @@ def check_edit_window(session: Session, db: DBSession):
             )
 
 
+def _flag(db, session_id, student_id, reason, severity="warning"):
+    db.add(AttendanceFlag(session_id=session_id, student_id=student_id, reason=reason, severity=severity))
+
+
+def _check_proxy_signals(db: DBSession, session: Session, student_id: str, device_id: Optional[str],
+                          lat: Optional[str], lng: Optional[str]):
+    """NEW FEATURE: lightweight proxy-attendance heuristics. Never blocks
+    the check-in — these raise a review flag for faculty/admin, since any
+    single signal (shared wifi, a borrowed phone) can be innocent. Two
+    checks:
+      1. Same device_id marking multiple DIFFERENT students in the same
+         session within a short window — the classic "pass the phone
+         around" pattern.
+      2. The same student checking in from two GPS points far enough
+         apart that they couldn't plausibly have moved between them,
+         across recent sessions today — a spoofed/replayed location.
+    """
+    now = datetime.utcnow()
+    if device_id:
+        recent = db.query(DeviceCheckin).filter(
+            DeviceCheckin.session_id == session.id,
+            DeviceCheckin.device_id == device_id,
+            DeviceCheckin.created_at >= now - timedelta(minutes=10),
+        ).all()
+        other_students = {c.student_id for c in recent if c.student_id != student_id}
+        if other_students:
+            _flag(db, session.id, student_id,
+                  f"Same device used to check in for {len(other_students)} other student(s) in this session within 10 minutes.",
+                  severity="high")
+    if lat and lng:
+        try:
+            flat, flng = float(lat), float(lng)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            prior = db.query(DeviceCheckin).filter(
+                DeviceCheckin.student_id == student_id,
+                DeviceCheckin.created_at >= today_start,
+                DeviceCheckin.created_at < now,
+            ).order_by(DeviceCheckin.created_at.desc()).first()
+            if prior and prior.lat and prior.lng:
+                dist = haversine(prior.lat, prior.lng, flat, flng)
+                minutes = max((now - prior.created_at).total_seconds() / 60, 0.1)
+                # ~200 km/h is already generous for "how fast could a
+                # person plausibly travel between two check-ins"
+                if dist > 1000 and (dist / 1000) / (minutes / 60) > 200:
+                    _flag(db, session.id, student_id,
+                          f"Checked in {int(dist)}m from a location checked in {int(minutes)} min ago — implausible travel speed.",
+                          severity="high")
+        except (ValueError, TypeError):
+            pass
+    db.add(DeviceCheckin(session_id=session.id, student_id=student_id, device_id=device_id, lat=lat, lng=lng))
+
+
 @router.post("/qr-gps-face", response_model=AttendanceOut, status_code=201)
 def mark_full_flow(
     payload: AttendanceMarkQR,
     current_user = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
-    session = db.query(Session).filter(
-        Session.qr_token == payload.qr_token,
-        Session.status   == SessionStatus.active
-    ).first()
+    settings = get_settings(db)
+    rotate_seconds = settings.qr_expiry or 45
+
+    # BUG FIX (security): the QR code used to be one static token for the
+    # whole session — trivially screenshotted and shared. It's now a
+    # rotating "{session_id}:{token}" payload (see core/security.py); this
+    # first pulls out the session_id (no trust placed in it yet), loads
+    # that session, then verifies the token against ITS real seed.
+    session = None
+    if ":" in payload.qr_token:
+        try:
+            sid_str, _tok = payload.qr_token.split(":", 1)
+            candidate = db.query(Session).filter(Session.id == int(sid_str), Session.status == SessionStatus.active).first()
+        except (ValueError, TypeError):
+            candidate = None
+        if candidate and candidate.qr_token and verify_qr_payload(candidate.qr_token, payload.qr_token, rotate_seconds) == candidate.id:
+            session = candidate
     if not session:
-        raise HTTPException(status_code=404, detail="Invalid or expired QR code.")
+        # Backward-compat: accept a raw static token too (old scanned QR
+        # still open in someone's camera roll, or a client that hasn't
+        # updated yet), so this rollout doesn't hard-break anyone mid-class.
+        session = db.query(Session).filter(
+            Session.qr_token == payload.qr_token,
+            Session.status   == SessionStatus.active
+        ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Invalid or expired QR code — ask faculty to refresh it.")
 
     # BUG FIX: branch/section were only ever enforced in the *listing*
     # endpoints (sessions/active, sessions/active/mine) for display
@@ -99,8 +177,7 @@ def mark_full_flow(
         try:
             dist    = haversine(session.gps_lat, session.gps_lng,
                                 payload.student_lat, payload.student_lng)
-            settings_obj = get_settings(db)
-            allowed = settings_obj.gps_range if settings_obj.gps_range is not None else 50
+            allowed = settings.gps_range if settings.gps_range is not None else 50
             if dist > allowed:
                 raise HTTPException(
                     status_code=403,
@@ -111,12 +188,27 @@ def mark_full_flow(
         except Exception:
             pass
 
+    # BUG FIX / NEW FEATURE: face matching now actually happens server-side.
+    # Previously face-api.js ran entirely in the browser and just told the
+    # server "matched" — calling this endpoint directly (devtools, curl,
+    # a replayed request) skipped the camera check completely.
+    if settings.face_required:
+        matched, reason = face_descriptor_matches(current_user.face_embedding, payload.face_descriptor)
+        if not matched:
+            raise HTTPException(status_code=403, detail=f"Face verification failed: {reason}")
+
     existing = db.query(AttendanceRecord).filter(
         AttendanceRecord.session_id == session.id,
         AttendanceRecord.student_id == current_user.inst_id
     ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Attendance already marked.")
+
+    # NEW FEATURE: proxy-detection heuristics — logs this check-in and
+    # raises a review flag for faculty/admin if something looks off. Never
+    # blocks the student; see _check_proxy_signals() docstring.
+    _check_proxy_signals(db, session, current_user.inst_id, payload.device_id,
+                          payload.student_lat, payload.student_lng)
 
     att_status = AttendanceStatus.present
     if session.started_at:
@@ -131,7 +223,20 @@ def mark_full_flow(
         student_lat = payload.student_lat,
         student_lng = payload.student_lng,
     )
-    db.add(record); db.commit(); db.refresh(record)
+    db.add(AttendanceAuditLog(session_id=session.id, student_id=current_user.inst_id,
+                               changed_by=current_user.inst_id, action="create",
+                               new_status=att_status.value if hasattr(att_status, "value") else str(att_status)))
+    # BUG FIX: the "already marked" check above is a check-then-insert, so
+    # two requests arriving together (double-tapping scan, an offline
+    # retry, or the PWA replaying a queued request) both pass it and the
+    # second one hits the uq_session_student unique constraint — which
+    # used to surface as a confusing 500 instead of the 409 the first
+    # check would have given. Catch it and return the same clean 409.
+    try:
+        db.add(record); db.commit(); db.refresh(record)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Attendance already marked.")
     return record
 
 
@@ -165,6 +270,15 @@ def mark_manual(
         AttendanceRecord.student_id == payload.student_id
     ).first()
     if existing:
+        # NEW: audit log — record who changed this edit and what it was
+        # before/after, so a disputed record can be traced.
+        db.add(AttendanceAuditLog(
+            record_id=existing.id, session_id=existing.session_id, student_id=existing.student_id,
+            changed_by=current_user.inst_id, action="update",
+            old_status=existing.status.value if hasattr(existing.status, "value") else str(existing.status),
+            new_status=payload.status.value if hasattr(payload.status, "value") else str(payload.status),
+            old_notes=existing.notes, new_notes=payload.notes,
+        ))
         existing.status = payload.status
         existing.method = AttendanceMethod.manual
         existing.notes  = payload.notes
@@ -175,7 +289,29 @@ def mark_manual(
         session_id=payload.session_id, student_id=payload.student_id,
         method=AttendanceMethod.manual, status=payload.status, notes=payload.notes,
     )
-    db.add(record); db.commit(); db.refresh(record)
+    db.add(AttendanceAuditLog(session_id=payload.session_id, student_id=payload.student_id,
+                               changed_by=current_user.inst_id, action="create",
+                               new_status=payload.status.value if hasattr(payload.status, "value") else str(payload.status),
+                               new_notes=payload.notes))
+    # Same check-then-insert race as the QR endpoint: if a student marks
+    # themselves via QR (or another faculty saves the same row) in the
+    # gap between the check above and this commit, fall back to updating
+    # the row that won instead of returning a 500.
+    try:
+        db.add(record); db.commit(); db.refresh(record)
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(AttendanceRecord).filter(
+            AttendanceRecord.session_id == payload.session_id,
+            AttendanceRecord.student_id == payload.student_id
+        ).first()
+        if not existing:
+            raise HTTPException(status_code=409, detail="Could not save attendance. Please retry.")
+        existing.status = payload.status
+        existing.method = AttendanceMethod.manual
+        existing.notes  = payload.notes
+        db.commit(); db.refresh(existing)
+        return existing
     return record
 
 
@@ -649,9 +785,21 @@ def section_insights(
 
     at_risk, safe, critical = [], [], []
     for stu in students:
-        records = db.query(AttendanceRecord)\
-            .filter(AttendanceRecord.student_id == stu.inst_id).all()
-        present = sum(1 for r in records if r.status.value == "present")
+        # BUG FIX: this used to count EVERY attendance record the student
+        # has ever had, across every branch/section/course they've ever
+        # been in, while total_sessions above only counts closed sessions
+        # for THIS branch+section. Mixing an unscoped numerator with a
+        # scoped denominator produced meaningless percentages (could even
+        # exceed 100%). Scope both sides the same way.
+        present = db.query(AttendanceRecord).join(
+            Session, AttendanceRecord.session_id == Session.id
+        ).filter(
+            AttendanceRecord.student_id == stu.inst_id,
+            AttendanceRecord.status == AttendanceStatus.present,
+            Session.status == SessionStatus.closed,
+            Session.branch == branch,
+            Session.section == section,
+        ).count()
         pct = round((present / total_sessions) * 100) if total_sessions else 0
         entry = {"id": stu.id, "name": stu.full_name, "inst_id": stu.inst_id,
                  "present": present, "total": total_sessions, "percentage": pct}
@@ -672,3 +820,208 @@ def section_insights(
         "at_risk_students":  sorted(at_risk,  key=lambda x: x["percentage"]),
         "safe_students":     sorted(safe,      key=lambda x: x["percentage"], reverse=True),
     }
+
+
+@router.get("/audit-log")
+def audit_log(
+    session_id: Optional[int] = None,
+    student_id: Optional[str] = None,
+    skip: int = 0, limit: int = 200,
+    _ = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    """NEW: real, server-side, persistent audit trail. Replaces the old
+    admin-panel 'Audit Log' page, which was a plain in-memory JS array —
+    reset on every refresh, never survived a browser change, and only
+    ever recorded 3 of the app's many mutating actions (approve/delete/
+    bulk-approve user). This one is populated by attendance
+    create/update actions (see mark_manual() and mark_full_flow() above)
+    and persists in the database."""
+    q = db.query(AttendanceAuditLog)
+    if session_id is not None:
+        q = q.filter(AttendanceAuditLog.session_id == session_id)
+    if student_id:
+        q = q.filter(AttendanceAuditLog.student_id == student_id)
+    total = q.count()
+    rows = q.order_by(AttendanceAuditLog.created_at.desc()).offset(skip).limit(limit).all()
+    return {"total": total, "entries": [
+        {"id": r.id, "record_id": r.record_id, "session_id": r.session_id, "student_id": r.student_id,
+         "changed_by": r.changed_by, "action": r.action, "old_status": r.old_status, "new_status": r.new_status,
+         "old_notes": r.old_notes, "new_notes": r.new_notes, "created_at": r.created_at.isoformat()}
+        for r in rows
+    ]}
+
+
+# ── Defaulter list ────────────────────────────────────────────────────────
+# Per-course attendance %, the way it's actually tracked for exam
+# eligibility ("you're at 68% in DBMS"), not just an overall figure.
+# Deliberately status-only — present/total/percent, nothing framed as "you
+# can still skip N more classes".
+@router.get("/defaulters", response_model=list[DefaulterOut])
+def defaulters(
+    course_id: str,
+    threshold: float = Query(75.0, ge=0, le=100),
+    _ = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    from models.models import Course
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found.")
+
+    sessions = db.query(Session).filter(Session.course_id == course_id, Session.status == SessionStatus.closed).all()
+    if not sessions:
+        return []
+    session_ids = [s.id for s in sessions]
+
+    # Which students are actually in scope for this course (its branch/section)
+    q = db.query(Student).filter(Student.status == "active")
+    if course.branch:
+        q = q.filter(Student.branch.ilike(f"%{course.branch}%"))
+    if course.section:
+        from sqlalchemy import func as _f
+        q = q.filter(_f.upper(Student.section) == course.section.strip().upper())
+    students = q.all()
+
+    excused = _excused_dates_by_student(db, [s.inst_id for s in students])
+
+    out = []
+    for stu in students:
+        applicable = [s for s in sessions if s.scheduled_at.date() not in excused.get(stu.inst_id, set())]
+        if not applicable:
+            continue
+        applicable_ids = {s.id for s in applicable}
+        present = db.query(AttendanceRecord).filter(
+            AttendanceRecord.student_id == stu.inst_id,
+            AttendanceRecord.session_id.in_(applicable_ids),
+            AttendanceRecord.status == AttendanceStatus.present,
+        ).count()
+        pct = round((present / len(applicable)) * 100, 1)
+        if pct < threshold:
+            out.append(DefaulterOut(
+                student_id=stu.inst_id, full_name=stu.full_name,
+                course_id=course.id, course_name=course.name,
+                present=present, total=len(applicable), percent=pct,
+            ))
+    out.sort(key=lambda d: d.percent)
+    return out
+
+
+def _excused_dates_by_student(db: DBSession, student_ids: list) -> dict:
+    """Approved leave/OD requests, expanded to a set of excused calendar
+    dates per student — used to exclude covered sessions from the
+    attendance-percentage denominator so a documented absence doesn't
+    unfairly tank someone's percentage."""
+    if not student_ids:
+        return {}
+    approved = db.query(LeaveRequest).filter(
+        LeaveRequest.student_id.in_(student_ids),
+        LeaveRequest.status == "approved",
+    ).all()
+    result = {}
+    for lr in approved:
+        d = lr.from_date.date()
+        end = lr.to_date.date()
+        days = set()
+        while d <= end:
+            days.add(d)
+            d += timedelta(days=1)
+        result.setdefault(lr.student_id, set()).update(days)
+    return result
+
+
+# ── NEW: proxy-detection flag review ─────────────────────────────────────
+@router.get("/flags", response_model=list[AttendanceFlagOut])
+def list_flags(
+    session_id: Optional[int] = None,
+    resolved: Optional[bool] = None,
+    skip: int = 0, limit: int = 100,
+    _ = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    q = db.query(AttendanceFlag)
+    if session_id is not None:
+        q = q.filter(AttendanceFlag.session_id == session_id)
+    if resolved is not None:
+        q = q.filter(AttendanceFlag.resolved == resolved)
+    return q.order_by(AttendanceFlag.created_at.desc()).offset(skip).limit(limit).all()
+
+
+@router.patch("/flags/{flag_id}", response_model=AttendanceFlagOut)
+def resolve_flag(
+    flag_id: int,
+    payload: FlagResolveRequest,
+    current_user = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    flag = db.query(AttendanceFlag).filter(AttendanceFlag.id == flag_id).first()
+    if not flag:
+        raise HTTPException(status_code=404, detail="Flag not found.")
+    flag.resolved = payload.resolved
+    flag.resolved_by = current_user.inst_id
+    db.commit(); db.refresh(flag)
+    return flag
+
+
+# ── NEW: monthly attendance report (xlsx) ────────────────────────────────
+@router.get("/report/monthly")
+def monthly_report(
+    year: int, month: int,
+    course_id: Optional[str] = None,
+    _ = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from fastapi.responses import StreamingResponse
+    from models.models import Course
+
+    start = datetime(year, month, 1)
+    end = datetime(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
+
+    q = db.query(Session).filter(Session.scheduled_at >= start, Session.scheduled_at < end,
+                                  Session.status == SessionStatus.closed)
+    if course_id:
+        q = q.filter(Session.course_id == course_id)
+    sessions = q.order_by(Session.scheduled_at).all()
+    session_ids = [s.id for s in sessions]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{year}-{month:02d}"
+    headers = ["Student ID", "Name", "Branch", "Section", "Present", "Total Sessions", "Percentage"]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True)
+
+    if session_ids:
+        student_q = db.query(Student).filter(Student.status == "active")
+        for stu in student_q.all():
+            present = db.query(AttendanceRecord).filter(
+                AttendanceRecord.student_id == stu.inst_id,
+                AttendanceRecord.session_id.in_(session_ids),
+                AttendanceRecord.status == AttendanceStatus.present,
+            ).count()
+            marked = db.query(AttendanceRecord).filter(
+                AttendanceRecord.student_id == stu.inst_id,
+                AttendanceRecord.session_id.in_(session_ids),
+            ).count()
+            if marked == 0:
+                continue
+            pct = round((present / marked) * 100, 1)
+            ws.append([stu.inst_id, stu.full_name, stu.branch or "", stu.section or "",
+                       present, marked, pct])
+
+    for col in ws.columns:
+        width = max((len(str(cell.value)) for cell in col if cell.value is not None), default=10)
+        ws.column_dimensions[col[0].column_letter].width = min(width + 3, 40)
+
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    fname = f"attendance_report_{year}_{month:02d}" + (f"_{course_id}" if course_id else "") + ".xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )

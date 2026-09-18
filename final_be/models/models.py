@@ -257,3 +257,96 @@ class SystemSettings(Base):
     inst_name     = Column(String(200), default="Teerthanker Mahaveer University")
     manual_edit_window = Column(Integer, default=10)  # minutes after session end
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ── New, additive-only tables ────────────────────────────────────────────────
+# Everything below is a brand-new table, not a new column on an existing one.
+# That matters: Base.metadata.create_all() (already run on every startup)
+# creates missing tables automatically but never ALTERs an existing table, so
+# these appear on your live Supabase DB with zero manual migration step. Any
+# *future* change that adds a column to Student/Session/AttendanceRecord etc.
+# will need the Alembic migration set up alongside this.
+
+class AttendanceFlag(Base):
+    """A possible-proxy signal raised at mark-time for faculty/admin review.
+    Never blocks the student — attendance still gets recorded — this is a
+    review queue, not an auto-reject, since GPS/device signals can have
+    innocent explanations (shared wifi router, a phone lent to a friend)."""
+    __tablename__  = "attendance_flags"
+    __table_args__ = {"schema": DB_SCHEMA}
+    id            = Column(Integer, primary_key=True, index=True)
+    session_id    = Column(Integer, nullable=False, index=True)
+    student_id    = Column(String(50), nullable=True, index=True)
+    reason        = Column(String(300), nullable=False)
+    severity      = Column(String(20), default="warning")  # info | warning | high
+    resolved      = Column(Boolean, default=False)
+    resolved_by   = Column(String(50), nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class DeviceCheckin(Base):
+    """One row per QR/GPS/face check-in attempt (success or fail), kept
+    separately from AttendanceRecord so proxy-detection heuristics can look
+    for patterns (same device marking several students, impossible GPS
+    jumps) without touching the attendance table itself."""
+    __tablename__  = "device_checkins"
+    __table_args__ = {"schema": DB_SCHEMA}
+    id            = Column(Integer, primary_key=True, index=True)
+    session_id    = Column(Integer, nullable=False, index=True)
+    student_id    = Column(String(50), nullable=False, index=True)
+    device_id     = Column(String(200), nullable=True, index=True)
+    lat           = Column(String(50), nullable=True)
+    lng           = Column(String(50), nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class AttendanceAuditLog(Base):
+    """Append-only history of every create/edit/delete on an attendance
+    record. Nothing reads this at request time — it exists purely so a
+    disputed "sir I was there" can be resolved by looking at who changed
+    what and when, instead of trusting whichever value survived."""
+    __tablename__  = "attendance_audit_log"
+    __table_args__ = {"schema": DB_SCHEMA}
+    id            = Column(Integer, primary_key=True, index=True)
+    record_id     = Column(Integer, nullable=True)
+    session_id    = Column(Integer, nullable=True, index=True)
+    student_id    = Column(String(50), nullable=True, index=True)
+    changed_by    = Column(String(50), nullable=True)
+    action        = Column(String(20), nullable=False)  # create | update | delete
+    old_status    = Column(String(20), nullable=True)
+    new_status    = Column(String(20), nullable=True)
+    old_notes     = Column(String(300), nullable=True)
+    new_notes     = Column(String(300), nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class LoginAttempt(Base):
+    """DB-backed login-attempt log, replacing the old in-memory rate
+    limiter. BUG FIX: the in-memory dict reset on every restart/redeploy
+    and didn't share state across multiple worker processes — on Render's
+    default config that made the rate limit mostly decorative."""
+    __tablename__  = "login_attempts"
+    __table_args__ = {"schema": DB_SCHEMA}
+    id            = Column(Integer, primary_key=True, index=True)
+    identifier    = Column(String(150), nullable=False, index=True)  # inst_id (lowercased)
+    success       = Column(Boolean, default=False)
+    created_at    = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class LeaveRequest(Base):
+    """Student-submitted leave / on-duty (OD) request. An approved request
+    excludes the covered dates from that student's attendance-percentage
+    denominator — see compute_attendance_percent() in routers/attendance.py."""
+    __tablename__  = "leave_requests"
+    __table_args__ = {"schema": DB_SCHEMA}
+    id            = Column(Integer, primary_key=True, index=True)
+    student_id    = Column(String(50), ForeignKey(_fk("students.inst_id")), nullable=False, index=True)
+    from_date     = Column(DateTime, nullable=False)
+    to_date       = Column(DateTime, nullable=False)
+    leave_type    = Column(String(20), default="leave")  # leave | od
+    reason        = Column(String(500), nullable=False)
+    status        = Column(String(20), default="pending", index=True)  # pending | approved | rejected
+    reviewed_by   = Column(String(50), nullable=True)
+    review_note   = Column(String(300), nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

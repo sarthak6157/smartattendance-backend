@@ -85,3 +85,83 @@ def require_roles(*roles):
             raise HTTPException(status_code=403, detail="Permission denied")
         return current_user
     return _check
+
+
+# ── Rotating QR token ─────────────────────────────────────────────────────
+# NEW FEATURE (fixes a real gap): the QR code used to be a single static
+# token for the whole class period — one screenshot forwarded to a group
+# chat let the entire class "attend" from their hostel rooms. This makes
+# the code embedded in the projected QR change every `rotate_seconds`
+# (SystemSettings.qr_expiry, already existed as a dead/unused field —
+# repurposed here rather than adding a new column) without needing any
+# background job or extra DB writes: the token is deterministically
+# derived from (a per-session secret seed, the session id, and the
+# current time bucket), so any request — faculty asking "what's the
+# current code" or a student submitting one — can verify it independently
+# just by recomputing the same HMAC.
+import hmac, hashlib, time
+
+def rotating_qr_token(seed: str, session_id: int, bucket: int) -> str:
+    msg = f"{session_id}:{bucket}".encode()
+    key = f"{SECRET_KEY}:{seed}".encode()
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()[:12]
+
+def current_qr_bucket(rotate_seconds: int) -> int:
+    return int(time.time() // max(rotate_seconds, 5))
+
+def build_qr_payload(seed: str, session_id: int, rotate_seconds: int) -> str:
+    bucket = current_qr_bucket(rotate_seconds)
+    return f"{session_id}:{rotating_qr_token(seed, session_id, bucket)}"
+
+def verify_qr_payload(seed: str, payload: str, rotate_seconds: int) -> Optional[int]:
+    """Returns the session_id if payload is a currently-valid rotating
+    token for that session (current bucket or the one before it, so a
+    request that lands right on a rotation boundary or after a couple of
+    seconds of network lag still succeeds), else None."""
+    try:
+        sid_str, token = payload.split(":", 1)
+        session_id = int(sid_str)
+    except (ValueError, AttributeError):
+        return None
+    bucket = current_qr_bucket(rotate_seconds)
+    valid = {rotating_qr_token(seed, session_id, bucket),
+             rotating_qr_token(seed, session_id, bucket - 1)}
+    return session_id if token in valid else None
+
+
+# ── Server-side face verification ────────────────────────────────────────
+# BUG FIX / NEW FEATURE: face matching used to happen ENTIRELY in the
+# browser (face-api.js decides "match", then just tells the server it
+# matched) — the server never actually checked. Anyone with devtools open
+# could call the attendance endpoint directly with no camera involved at
+# all. This compares the descriptor the browser captured against the
+# student's registered embedding using a standard Euclidean distance,
+# same metric face-api.js itself uses for its own client-side threshold.
+import json
+
+FACE_MATCH_THRESHOLD = 0.5  # face-api.js's own recommended cutoff
+
+def face_descriptor_matches(stored_embedding_json: Optional[str], submitted: Optional[list]) -> tuple[bool, str]:
+    """Returns (matched, reason). `matched` is False (never throws) if
+    either side is missing/malformed, so callers can decide what a
+    missing registration means for their flow rather than getting a 500."""
+    if not stored_embedding_json:
+        return False, "No face registered for this account."
+    if not submitted or len(submitted) != 128:
+        return False, "No valid face capture received."
+    try:
+        stored = json.loads(stored_embedding_json)
+    except (ValueError, TypeError):
+        return False, "Stored face data is corrupted — please re-register your face."
+    if not isinstance(stored, list) or len(stored) != 128:
+        return False, "Stored face data is invalid — please re-register your face."
+    try:
+        dist = math_sqrt_sum_sq_diff(stored, submitted)
+    except (TypeError, ValueError):
+        return False, "Face capture data was invalid."
+    if dist > FACE_MATCH_THRESHOLD:
+        return False, f"Face did not match your registered face (distance {dist:.2f})."
+    return True, "ok"
+
+def math_sqrt_sum_sq_diff(a: list, b: list) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5

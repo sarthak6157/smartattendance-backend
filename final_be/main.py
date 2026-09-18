@@ -91,7 +91,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 from routers import (auth, users, sessions, attendance,
-                     courses, settings as settings_router, timetable, notifications)
+                     courses, settings as settings_router, timetable, notifications, leave)
 
 app.include_router(auth.router,            prefix="/api/auth",          tags=["Auth"])
 app.include_router(users.router,           prefix="/api/users",         tags=["Users"])
@@ -101,14 +101,22 @@ app.include_router(courses.router,         prefix="/api/courses",       tags=["C
 app.include_router(settings_router.router, prefix="/api/settings",      tags=["Settings"])
 app.include_router(timetable.router,       prefix="/api/timetable",     tags=["Timetable"])
 app.include_router(notifications.router,   prefix="/api/notifications", tags=["Notifications"])
+app.include_router(leave.router,           prefix="/api/leave",         tags=["Leave"])
+
 
 # ── Startup — create tables + seed ────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     print("=== STARTUP ===")
     db_url = os.getenv("DATABASE_URL", "")
+    # BUG FIX: this never actually checked for a sqlite:// URL — any
+    # DATABASE_URL that didn't mention "supabase" or "neon" fell through
+    # to "Using PostgreSQL database", including the sqlite fallback path,
+    # which made every local/dev/test run print a flatly wrong DB type.
     if not db_url:
         print("⚠️  DATABASE_URL not set — using SQLite fallback")
+    elif "sqlite" in db_url:
+        print("✅ Using SQLite database:", db_url)
     elif "supabase" in db_url:
         print("✅ Using Supabase database")
     elif "neon" in db_url:

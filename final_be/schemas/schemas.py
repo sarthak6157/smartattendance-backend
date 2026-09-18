@@ -135,6 +135,14 @@ class AttendanceMarkQR(BaseModel):
     qr_token: str
     student_lat: Optional[str] = None
     student_lng: Optional[str] = None
+    # New: 128-float face-api.js descriptor, compared server-side against
+    # the student's registered embedding — previously the server trusted
+    # the browser's own "face matched" claim with no verification at all.
+    face_descriptor: Optional[List[float]] = None
+    # New: a client-generated, localStorage-persisted random id (NOT a
+    # hardware fingerprint — just enough to notice "the same browser just
+    # marked five different students in one class").
+    device_id: Optional[str] = None
 
 class AttendanceMarkManual(BaseModel):
     session_id: int
@@ -170,5 +178,65 @@ class SettingsUpdate(BaseModel):
     inst_name:     Optional[str]  = None
 
 TokenResponse.model_rebuild()
+
+# ── New feature schemas ──────────────────────────────────────────────────────
+
+class QRLiveOut(BaseModel):
+    """Response for GET /sessions/{id}/qr-live — the rotating QR payload the
+    faculty display page polls and re-renders every few seconds."""
+    session_id: int
+    qr_payload: str          # what actually goes INTO the QR code image
+    rotates_every: int       # seconds
+    seconds_remaining: int
+
+class AttendanceFlagOut(BaseModel):
+    id: int
+    session_id: int
+    student_id: Optional[str]
+    reason: str
+    severity: str
+    resolved: bool
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+class FlagResolveRequest(BaseModel):
+    resolved: bool = True
+
+class DefaulterOut(BaseModel):
+    student_id: str
+    full_name: str
+    course_id: str
+    course_name: str
+    present: int
+    total: int
+    percent: float
+    model_config = {"from_attributes": True}
+
+class LeaveCreate(BaseModel):
+    from_date: datetime
+    to_date: datetime
+    leave_type: str = "leave"  # "leave" | "od"
+    reason: str
+
+class LeaveReview(BaseModel):
+    status: str  # "approved" | "rejected"
+    review_note: Optional[str] = None
+
+class LeaveOut(BaseModel):
+    id: int
+    student_id: str
+    from_date: datetime
+    to_date: datetime
+    leave_type: str
+    reason: str
+    status: str
+    reviewed_by: Optional[str]
+    review_note: Optional[str]
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+class LeaveListOut(BaseModel):
+    total: int
+    requests: List[LeaveOut]
 
 # Timetable schemas already handled inside timetable.py router directly

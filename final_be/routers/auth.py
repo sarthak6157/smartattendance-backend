@@ -1,39 +1,53 @@
 """Auth routes: login, register, profile, change-password."""
-from datetime import datetime
-from collections import defaultdict
-from time import time
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from core.security import create_access_token, get_current_user, hash_password, verify_password
 from routers.users import _sanitize, SELF_EDITABLE_FIELDS
 from db.database import get_db
-from models.models import Student, Faculty, Admin, ROLE_MODEL, UserRole, UserStatus
+from models.models import LoginAttempt, Student, Faculty, Admin, ROLE_MODEL, UserRole, UserStatus
 from schemas.schemas import LoginRequest, PasswordChangeRequest, TokenResponse, UserCreate, UserOut, UserUpdate
 
 router = APIRouter()
 
-# ── Simple in-memory rate limiter: IP → list of attempt timestamps ──────────
-_login_attempts: dict = defaultdict(list)
+# ── DB-backed rate limiter ───────────────────────────────────────────────
+# BUG FIX: this used to be an in-memory dict keyed by IP only. Two
+# problems: (1) it reset on every restart/redeploy and didn't share state
+# across multiple worker processes, so on any multi-worker deploy it was
+# mostly decorative; (2) keying by IP alone means an entire campus behind
+# one NAT'd wifi IP shares a single 5-attempt budget — one student
+# mistyping their password five times locks out everyone else on the same
+# network. Moved to the DB (new login_attempts table, additive-only — see
+# models.py) and keyed by IP+credential together, so the limit applies
+# per attempted account, not per network.
 _MAX_ATTEMPTS   = 5
 _WINDOW_SECONDS = 300  # 5 minutes
 
-def _check_rate_limit(ip: str):
-    now  = time()
-    attempts = [t for t in _login_attempts[ip] if now - t < _WINDOW_SECONDS]
-    _login_attempts[ip] = attempts
-    if len(attempts) >= _MAX_ATTEMPTS:
-        wait = int(_WINDOW_SECONDS - (now - attempts[0]))
+def _check_rate_limit(db: Session, identifier: str):
+    now = datetime.utcnow()
+    window_start = now - timedelta(seconds=_WINDOW_SECONDS)
+    failed = db.query(LoginAttempt).filter(
+        LoginAttempt.identifier == identifier,
+        LoginAttempt.created_at >= window_start,
+        LoginAttempt.success == False,
+    ).order_by(LoginAttempt.created_at.asc()).all()
+    if len(failed) >= _MAX_ATTEMPTS:
+        wait = int(_WINDOW_SECONDS - (now - failed[0].created_at).total_seconds())
         raise HTTPException(
             status_code=429,
-            detail=f"Too many login attempts. Try again in {wait//60+1} minute(s)."
+            detail=f"Too many login attempts. Try again in {max(wait, 1)//60 + 1} minute(s)."
         )
-    _login_attempts[ip].append(now)
+
+def _record_attempt(db: Session, identifier: str, success: bool):
+    db.add(LoginAttempt(identifier=identifier, success=success))
+    db.commit()
 
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    _check_rate_limit(request.client.host)
     credential = payload.credential.strip()
+    identifier = f"{request.client.host}:{credential.lower()}"
+    _check_rate_limit(db, identifier)
     # Students/faculty/admins now live in three separate tables — the
     # role tab the person picked on the login screen tells us which one
     # to search, instead of scanning everyone.
@@ -44,6 +58,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         (model.email == credential) | (model.inst_id == credential)
     ).first()
     if not user or not verify_password(payload.password, user.hashed_password):
+        _record_attempt(db, identifier, success=False)
         raise HTTPException(status_code=401, detail="Invalid credentials.")
     if user.status == UserStatus.pending:
         raise HTTPException(status_code=403, detail="Account pending admin approval.")
@@ -51,8 +66,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         raise HTTPException(status_code=403, detail="Account is deactivated. Contact admin.")
     user.last_login = datetime.utcnow()
     db.commit()
-    # Clear rate limit on successful login
-    _login_attempts.pop(request.client.host, None)
+    _record_attempt(db, identifier, success=True)
     # inst_id — NOT the cosmetic id field — is the real identity/login key
     token = create_access_token({"sub": user.inst_id, "role": user.role.value})
     return TokenResponse(access_token=token, user=UserOut.model_validate(user))

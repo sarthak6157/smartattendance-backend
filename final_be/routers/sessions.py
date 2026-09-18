@@ -1,19 +1,42 @@
 
 """Session routes — faculty ends live sessions only."""
-import secrets
+import secrets, time
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session as DBSession
 
-from core.security import get_current_user, require_roles
+from core.security import get_current_user, require_roles, build_qr_payload, current_qr_bucket
 from db.database import get_db
-from models.models import Session, SessionStatus, UserRole
-from schemas.schemas import SessionListOut, SessionOut
+from models.models import Session, SessionStatus, SystemSettings, UserRole
+from schemas.schemas import QRLiveOut, SessionListOut, SessionOut
 
 router = APIRouter()
 FacultyOrAdmin = require_roles(UserRole.faculty, UserRole.admin)
+
+
+def _mask_qr_for(session_or_list, current_user):
+    """BUG FIX (pre-existing, not introduced by the QR-rotation feature):
+    SessionOut.qr_token was returned to EVERY caller, including students —
+    meaning a student could read the classroom's live QR value straight
+    out of GET /sessions/active's JSON response, no scanning required at
+    all. That defeats "you must be scanning the projected code" as a
+    control entirely, independent of whether the token itself rotates.
+    Only faculty (their own sessions) and admins get to see it.
+    Builds a SessionOut copy rather than mutating the ORM object in
+    place — mutating s.qr_token directly would mark it dirty on the
+    SQLAlchemy session and risk a stray db.commit() elsewhere in the
+    same request silently wiping out the real token in the database."""
+    items = session_or_list if isinstance(session_or_list, list) else [session_or_list]
+    out = []
+    for s in items:
+        so = SessionOut.model_validate(s)
+        is_owner_faculty = current_user.role == UserRole.faculty and getattr(s, "faculty_id", None) == current_user.inst_id
+        if not (current_user.role == UserRole.admin or is_owner_faculty):
+            so.qr_token = None
+        out.append(so)
+    return out if isinstance(session_or_list, list) else out[0]
 
 
 @router.get("", response_model=SessionListOut)
@@ -51,7 +74,7 @@ def list_sessions(
         ))
     total    = q.count()
     sessions = q.order_by(Session.scheduled_at.desc()).offset(skip).limit(limit).all()
-    return {"total": total, "sessions": sessions}
+    return {"total": total, "sessions": _mask_qr_for(sessions, current_user)}
 
 
 @router.get("/active", response_model=list[SessionOut])
@@ -100,7 +123,7 @@ def get_active(
     # Also only return sessions that are for this specific section
     # (not sessions from other classes accidentally leaking through)
     results = q.all()
-    return results
+    return _mask_qr_for(results, current_user)
 
 
 @router.get("/active/mine", response_model=list[SessionOut])
@@ -133,14 +156,14 @@ def get_my_active_sessions(
         Session.sub_section == None, Session.sub_section == '',
         func.upper(Session.sub_section) == student_subsec,
     ))
-    return q.all()
+    return _mask_qr_for(q.all(), current_user)
 
 
 @router.get("/{session_id}", response_model=SessionOut)
-def get_session(session_id: int, _ = Depends(get_current_user), db: DBSession = Depends(get_db)):
+def get_session(session_id: int, current_user = Depends(get_current_user), db: DBSession = Depends(get_db)):
     s = db.query(Session).filter(Session.id == session_id).first()
     if not s: raise HTTPException(status_code=404, detail="Session not found.")
-    return s
+    return _mask_qr_for(s, current_user)
 
 
 @router.post("/{session_id}/end", response_model=SessionOut)
@@ -168,6 +191,32 @@ def refresh_qr(session_id: int, current_user = Depends(FacultyOrAdmin), db: DBSe
     s.qr_token = secrets.token_urlsafe(16)
     db.commit(); db.refresh(s)
     return s
+
+
+# ── NEW: rotating QR — faculty's projector page polls this ──────────────
+# Returns what should actually go INTO the QR code image right now, and
+# how many seconds until it changes. s.qr_token itself never changes on
+# this call — it's the SEED the rotating payload is derived from; only
+# /refresh-qr rotates the seed (e.g. if faculty suspects it's been shared).
+@router.get("/{session_id}/qr-live", response_model=QRLiveOut)
+def qr_live(session_id: int, current_user = Depends(FacultyOrAdmin), db: DBSession = Depends(get_db)):
+    s = db.query(Session).filter(Session.id == session_id).first()
+    if not s or s.status != SessionStatus.active:
+        raise HTTPException(status_code=400, detail="Session not active.")
+    if current_user.role != UserRole.admin and s.faculty_id != current_user.inst_id:
+        raise HTTPException(status_code=403)
+    if not s.qr_token:
+        raise HTTPException(status_code=400, detail="No QR seed set for this session.")
+    settings = db.query(SystemSettings).filter(SystemSettings.id == 1).first()
+    rotate_every = (settings.qr_expiry if settings and settings.qr_expiry else 45)
+    bucket = current_qr_bucket(rotate_every)
+    seconds_into_bucket = int(time.time()) % max(rotate_every, 5)
+    return QRLiveOut(
+        session_id=s.id,
+        qr_payload=build_qr_payload(s.qr_token, s.id, rotate_every),
+        rotates_every=rotate_every,
+        seconds_remaining=max(rotate_every, 5) - seconds_into_bucket,
+    )
 
 
 @router.delete("/{session_id}", status_code=204)
