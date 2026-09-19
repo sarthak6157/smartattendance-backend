@@ -44,13 +44,13 @@ def admin_headers(client):
 
 @pytest.fixture()
 def student_headers(client, admin_headers):
-    r = client.post("/api/auth/register", json={
+    # Self-registration is disabled — students are now admin-created too,
+    # same path as faculty_headers below.
+    r = client.post("/api/users", json={
         "full_name": "Test Student", "inst_id": "STU100", "email": "stu100@tmu.ac.in",
         "password": "Pass@1234", "role": "student", "branch": "CSE", "section": "A", "semester": "3rd",
-    })
+    }, headers=admin_headers)
     assert r.status_code == 201, r.text
-    r = client.patch("/api/users/STU100/status", json={"status": "active"}, headers=admin_headers)
-    assert r.status_code == 200, r.text
     r = client.post("/api/auth/login", json={"credential": "STU100", "password": "Pass@1234", "role": "student"})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}

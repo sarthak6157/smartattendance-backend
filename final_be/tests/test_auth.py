@@ -14,22 +14,28 @@ def test_wrong_password_rejected(client):
     assert r.status_code == 401
 
 
-def test_public_registration_always_creates_student(client):
-    """Public /register must ignore any other role requested — faculty/
-    admin accounts can only be created by an admin via POST /users."""
+def test_public_registration_is_disabled(client):
+    """CHANGE: self-registration was removed at the user's request —
+    every account is now admin-created via POST /users."""
     r = client.post("/api/auth/register", json={
         "full_name": "Sneaky", "inst_id": "SNEAKY1", "email": "sneaky@tmu.ac.in",
-        "password": "Pass@1234", "role": "faculty",
-    })
-    assert r.status_code == 201
-    assert r.json()["role"] == "student"
-
-
-def test_pending_student_cannot_login(client):
-    client.post("/api/auth/register", json={
-        "full_name": "Pending Guy", "inst_id": "PEND1", "email": "pend1@tmu.ac.in",
         "password": "Pass@1234", "role": "student",
     })
+    assert r.status_code == 403
+
+
+def test_pending_student_cannot_login(client, admin_headers):
+    # admin_create_user always sets status=active, so to exercise the
+    # pending-blocks-login path we create then explicitly demote — this
+    # still matters even with registration gone, since an admin can move
+    # a user back to pending for other reasons (e.g. re-verification).
+    r = client.post("/api/users", json={
+        "full_name": "Pending Guy", "inst_id": "PEND1", "email": "pend1@tmu.ac.in",
+        "password": "Pass@1234", "role": "student",
+    }, headers=admin_headers)
+    assert r.status_code == 201
+    r = client.patch("/api/users/PEND1/status", json={"status": "pending"}, headers=admin_headers)
+    assert r.status_code == 200
     r = client.post("/api/auth/login", json={"credential": "PEND1", "password": "Pass@1234", "role": "student"})
     assert r.status_code == 403
 
@@ -86,9 +92,9 @@ def test_admin_can_edit_academic_fields(client, student_headers, admin_headers):
 
 
 def test_student_cannot_edit_other_students(client, student_headers, admin_headers):
-    client.post("/api/auth/register", json={
+    client.post("/api/users", json={
         "full_name": "Other Student", "inst_id": "STU200", "email": "stu200@tmu.ac.in",
         "password": "Pass@1234", "role": "student",
-    })
+    }, headers=admin_headers)
     r = client.patch("/api/users/STU200", json={"full_name": "Hacked"}, headers=student_headers)
     assert r.status_code == 403

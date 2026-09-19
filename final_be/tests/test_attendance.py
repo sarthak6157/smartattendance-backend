@@ -104,11 +104,10 @@ def test_face_descriptor_match_accepted(client, student_headers, faculty_headers
 
 def test_wrong_branch_student_blocked(client, faculty_headers, admin_headers):
     client.patch("/api/settings", json={"face_required": False}, headers=admin_headers)
-    client.post("/api/auth/register", json={
+    client.post("/api/users", json={
         "full_name": "ECE Student", "inst_id": "ECE1", "email": "ece1@tmu.ac.in",
         "password": "Pass@1234", "role": "student", "branch": "ECE", "section": "A",
-    })
-    client.patch("/api/users/ECE1/status", json={"status": "active"}, headers=admin_headers)
+    }, headers=admin_headers)
     ece_headers = client.post("/api/auth/login", json={"credential": "ECE1", "password": "Pass@1234", "role": "student"})
     ece_headers = {"Authorization": f"Bearer {ece_headers.json()['access_token']}"}
 
@@ -140,11 +139,10 @@ def test_manual_mark_writes_audit_log(client, student_headers, faculty_headers, 
 def test_proxy_flag_raised_for_shared_device(client, faculty_headers, admin_headers):
     client.patch("/api/settings", json={"face_required": False}, headers=admin_headers)
     for i, inst_id in enumerate(["MULTI1", "MULTI2"]):
-        client.post("/api/auth/register", json={
+        client.post("/api/users", json={
             "full_name": f"Student {i}", "inst_id": inst_id, "email": f"{inst_id.lower()}@tmu.ac.in",
             "password": "Pass@1234", "role": "student", "branch": "CSE", "section": "A",
-        })
-        client.patch(f"/api/users/{inst_id}/status", json={"status": "active"}, headers=admin_headers)
+        }, headers=admin_headers)
 
     session = _make_active_session(client, faculty_headers, admin_headers)
     live = client.get(f"/api/sessions/{session['id']}/qr-live", headers=faculty_headers).json()
@@ -165,3 +163,16 @@ def test_defaulters_endpoint_scoped_correctly(client, student_headers, faculty_h
     client.post("/api/sessions/extra", json={"course_id": "CS301", "title": "s2"}, headers=faculty_headers)
     r = client.get("/api/attendance/defaulters?course_id=CS301", headers=faculty_headers)
     assert r.status_code == 200  # no closed sessions yet, so no crash, empty-safe
+
+
+def test_leave_od_type_no_longer_accepted(client, student_headers):
+    """CHANGE regression test: OD was removed as a leave type — a client
+    that still sends 'od' (stale cache, old mobile build) gets silently
+    normalized to 'leave' rather than erroring, since the type field is
+    otherwise cosmetic."""
+    r = client.post("/api/leave", json={
+        "from_date": "2026-11-01T00:00:00", "to_date": "2026-11-02T00:00:00",
+        "leave_type": "od", "reason": "Conference",
+    }, headers=student_headers)
+    assert r.status_code == 201
+    assert r.json()["leave_type"] == "leave"

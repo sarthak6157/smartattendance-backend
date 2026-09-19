@@ -74,29 +74,16 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
 
 @router.post("/register", response_model=UserOut, status_code=201)
 def register(payload: UserCreate, db: Session = Depends(get_db)):
-    """Public registration — always creates a student, status=pending."""
-    existing = db.query(Student).filter(
-        (Student.inst_id == payload.inst_id) | (Student.email == payload.email)
-    ).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="User with this ID or email already exists.")
-    dept = payload.department or payload.branch or ''
-    new_user = Student(
-        full_name=_sanitize(payload.full_name, 200),
-        inst_id=payload.inst_id,
-        email=payload.email,
-        status=UserStatus.pending,
-        hashed_password=hash_password(payload.password),
-        department=dept,
-        branch=payload.branch or payload.department or '',
-        section=getattr(payload, 'section', None),
-        semester=getattr(payload, 'semester', None),
-        course=getattr(payload, 'course_type', None),
+    """DISABLED — public self-registration is turned off. All accounts
+    (student, faculty, admin) are now created by an admin via
+    POST /api/users. Kept as a route (rather than deleted) that always
+    403s, so anyone hitting the old endpoint — a cached frontend build, a
+    bookmarked API call, a script — gets a clear, explicit reason instead
+    of a generic 404, and so this is a one-line revert if ever needed."""
+    raise HTTPException(
+        status_code=403,
+        detail="Self-registration is disabled. Contact your administrator to get an account created.",
     )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return new_user
 
 
 @router.get("/me", response_model=UserOut)

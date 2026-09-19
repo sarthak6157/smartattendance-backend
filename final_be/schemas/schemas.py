@@ -215,7 +215,7 @@ class DefaulterOut(BaseModel):
 class LeaveCreate(BaseModel):
     from_date: datetime
     to_date: datetime
-    leave_type: str = "leave"  # "leave" | "od"
+    leave_type: str = "leave"  # OD removed — "leave" is the only type now
     reason: str
 
 class LeaveReview(BaseModel):

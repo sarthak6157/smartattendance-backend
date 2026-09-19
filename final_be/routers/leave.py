@@ -1,11 +1,17 @@
-"""Leave / on-duty (OD) request workflow — NEW FEATURE.
+"""Leave request workflow — NEW FEATURE.
 
-Students submit a leave/OD request for a date range with a reason.
+Students submit a leave request for a date range with a reason.
 Faculty/admin approve or reject. An approved request excludes its date
 range from that student's attendance-percentage denominator wherever
 percentages are computed (see attendance.py's _excused_dates_by_student
 and defaulters()) — so a documented, approved absence doesn't unfairly
 tank someone's eligibility number.
+
+NOTE: On-Duty (OD) was removed as a request type at the user's request —
+only "leave" exists now. leave_type is kept as a column/field (rather
+than deleted outright) since it costs nothing to leave in place and
+makes reintroducing OD, or adding another type later, a small change
+instead of a schema migration.
 """
 from datetime import datetime
 from typing import Optional
@@ -28,14 +34,16 @@ def create_leave(
 ):
     if payload.to_date < payload.from_date:
         raise HTTPException(status_code=400, detail="to_date cannot be before from_date.")
-    if payload.leave_type not in ("leave", "od"):
-        raise HTTPException(status_code=400, detail="leave_type must be 'leave' or 'od'.")
+    # BUG FIX / CHANGE: OD removed per request — "leave" is now the only
+    # accepted type, regardless of what a client sends (defensive against
+    # a stale cached frontend still offering the OD option).
+    leave_type = "leave"
     if not payload.reason or not payload.reason.strip():
         raise HTTPException(status_code=400, detail="A reason is required.")
     req = LeaveRequest(
         student_id=current_user.inst_id,
         from_date=payload.from_date, to_date=payload.to_date,
-        leave_type=payload.leave_type, reason=payload.reason.strip()[:500],
+        leave_type=leave_type, reason=payload.reason.strip()[:500],
         status="pending",
     )
     db.add(req); db.commit(); db.refresh(req)
