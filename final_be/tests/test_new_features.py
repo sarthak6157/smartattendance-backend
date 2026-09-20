@@ -62,6 +62,26 @@ def test_push_subscription_persists_across_app_reload(client, student_headers):
     assert r.status_code == 200
 
 
+def test_unrestricted_session_does_not_notify_whole_university(client, faculty_headers, admin_headers):
+    """Regression test for the audit-found bug: an extra class with no
+    branch/section set used to notify EVERY active student in the
+    entire university (the `if session.branch:` filter was skipped
+    entirely, not applied as "no restriction"). It must now notify
+    nobody automatically instead — verified via the manual notify
+    endpoint's response, which goes through the exact same shared
+    function the automatic go-live/extra-class calls use."""
+    client.post("/api/courses", json={"code": "CS999", "name": "Unrestricted", "credits": 4}, headers=admin_headers)
+    r = client.post("/api/sessions/extra", json={"course_id": "CS999", "title": "Open to all"}, headers=faculty_headers)
+    assert r.status_code == 201
+    session_id = r.json()["id"]
+
+    r = client.post(f"/api/notifications/notify/session-live/{session_id}", headers=faculty_headers)
+    assert r.status_code == 200
+    assert r.json()["students_count"] == 0
+    assert "skipped" in r.json()
+
+
+
 # ── Room/venue conflict detection ─────────────────────────────────────────
 def test_room_conflict_detected_across_different_sections(client, admin_headers):
     fac1 = _make_faculty(client, admin_headers, "FACA")
@@ -75,6 +95,32 @@ def test_room_conflict_detected_across_different_sections(client, admin_headers)
     room_conflicts = [c for c in conflicts if c["type"] == "room"]
     assert len(room_conflicts) == 1
     assert room_conflicts[0]["room"] == "Room 101"
+
+
+def test_room_conflict_across_different_branches_still_caught_when_filtered(client, admin_headers):
+    """Regression test for the audit-found bug: querying conflicts
+    scoped to ONE branch used to only compare slots within that same
+    branch, so a room double-booked between two DIFFERENT branches was
+    invisible no matter which branch you filtered by. Rooms (and
+    faculty) are university-wide resources, not per-branch ones."""
+    _make_faculty(client, admin_headers, "FACCSE")
+    _make_faculty(client, admin_headers, "FACECE")
+    _make_slot(client, admin_headers, "FACCSE", room="Shared Hall", branch="CSE",
+               section="A", course_id="CS401")
+    _make_slot(client, admin_headers, "FACECE", room="Shared Hall", branch="ECE",
+               section="A", course_id="EC401")
+
+    # Filtering to just CSE must still surface the CSE-vs-ECE room clash
+    r = client.get("/api/timetable/conflicts?branch=CSE", headers=admin_headers)
+    assert r.status_code == 200
+    room_conflicts = [c for c in r.json()["conflicts"] if c["type"] == "room"]
+    assert len(room_conflicts) == 1
+    assert room_conflicts[0]["room"] == "Shared Hall"
+
+    # And filtering to ECE surfaces the same real conflict too
+    r = client.get("/api/timetable/conflicts?branch=ECE", headers=admin_headers)
+    room_conflicts = [c for c in r.json()["conflicts"] if c["type"] == "room"]
+    assert len(room_conflicts) == 1
 
 
 def test_teacher_conflict_still_detected(client, admin_headers):
@@ -187,3 +233,52 @@ def test_cannot_assign_self_as_substitute(client, admin_headers):
         "substitute_faculty_id": "FACA",  # same person
     }, headers=admin_headers)
     assert r.status_code == 400
+
+
+def test_cannot_assign_substitute_for_unrelated_slot(client, admin_headers):
+    """Regression test for the audit-found bug: assign-substitute never
+    checked that the timetable_slot_id actually belonged to the faculty
+    member whose leave this is — a slot_id from a completely different
+    faculty's schedule used to be silently accepted."""
+    _make_faculty(client, admin_headers, "FACA")
+    _make_faculty(client, admin_headers, "FACUNRELATED")
+    unrelated_slot = _make_slot(client, admin_headers, "FACUNRELATED", room="Room 601",
+                                 day="wednesday", section="Z", course_id="CS777")
+    fac_headers = client.post("/api/auth/login", json={"credential": "FACA", "password": "Pass@1234", "role": "faculty"})
+    fac_headers = {"Authorization": f"Bearer {fac_headers.json()['access_token']}"}
+    r = client.post("/api/leave", json={
+        "from_date": "2026-11-04T00:00:00", "to_date": "2026-11-04T00:00:00", "reason": "x",
+    }, headers=fac_headers)
+    leave_id = r.json()["id"]
+    client.patch(f"/api/leave/{leave_id}", json={"status": "approved"}, headers=admin_headers)
+
+    r = client.post(f"/api/leave/{leave_id}/assign-substitute", json={
+        "timetable_slot_id": unrelated_slot["id"],
+        "class_date": "2026-11-04T00:00:00",
+        "substitute_faculty_id": "FACSUB2",
+    }, headers=admin_headers)
+    assert r.status_code == 400
+    assert "doesn't belong" in r.json()["detail"]
+
+
+def test_cannot_assign_substitute_outside_leave_date_range(client, admin_headers):
+    """Regression test: class_date was never validated against the
+    leave's actual [from_date, to_date] range."""
+    _make_faculty(client, admin_headers, "FACA")
+    _make_faculty(client, admin_headers, "FACSUB3")
+    slot = _make_slot(client, admin_headers, "FACA", room="Room 701", day="thursday")
+    fac_headers = client.post("/api/auth/login", json={"credential": "FACA", "password": "Pass@1234", "role": "faculty"})
+    fac_headers = {"Authorization": f"Bearer {fac_headers.json()['access_token']}"}
+    r = client.post("/api/leave", json={
+        "from_date": "2026-11-05T00:00:00", "to_date": "2026-11-05T00:00:00", "reason": "x",
+    }, headers=fac_headers)
+    leave_id = r.json()["id"]
+    client.patch(f"/api/leave/{leave_id}", json={"status": "approved"}, headers=admin_headers)
+
+    r = client.post(f"/api/leave/{leave_id}/assign-substitute", json={
+        "timetable_slot_id": slot["id"],
+        "class_date": "2026-12-25T00:00:00",  # nowhere near the leave range
+        "substitute_faculty_id": "FACSUB3",
+    }, headers=admin_headers)
+    assert r.status_code == 400
+    assert "outside" in r.json()["detail"]

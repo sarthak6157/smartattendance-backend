@@ -98,11 +98,45 @@ def notify_students_session_live(db: DBSession, session: Session) -> dict:
     automatically from go_live()/create_extra_class() as well as from the
     manual endpoint below. Previously this only existed as something a
     faculty member had to remember to trigger by hand — dead code from
-    the students' point of view unless someone clicked an extra button."""
+    the students' point of view unless someone clicked an extra button.
+
+    BUG FIX (found on audit): this used to run `if session.branch: filter
+    by branch` — for an ad-hoc extra class with no branch set (a valid,
+    common case; ExtraClassRequest defaults branch to ""), that condition
+    is False, the filter is skipped entirely, and EVERY active student in
+    the whole university gets pushed a notification for a class
+    completely unrelated to them. An unrestricted session now notifies
+    nobody — this applies to the manual /notify/session-live/{id}
+    endpoint too, since it calls this same function; broadcasting to
+    every student across every college (Medical, Dental, Law,
+    Engineering...) for one class going live isn't something either path
+    should ever do by accident.
+
+    BUG FIX (found on audit): branch matching was an exact `==` string
+    comparison — inconsistent with the flexible "B.Tech CSE" vs "CSE"
+    matching already used for the actual attendance-marking permission
+    check in attendance.py's mark_full_flow(). An exact-match mismatch
+    here meant real students could go un-notified for their own class
+    just because their stored branch string was formatted slightly
+    differently. Now uses the same matching logic both places."""
+    if not session.branch:
+        return {"students_count": 0, "pushes_sent": 0, "skipped": "no branch/section restriction on this session"}
+
+    import re as _re
+    sb = session.branch.strip().lower()
+    sb_core = _re.sub(r'(?i)^(b\.tech|b\.e|m\.tech|bca|mca|mba|b\.sc)[\s\-]+', '', sb).strip()
+
     q = db.query(Student).filter(Student.status == "active")
-    if session.branch:  q = q.filter(Student.branch  == session.branch)
-    if session.section: q = q.filter(Student.section == session.section)
-    students = q.all()
+    if session.section:
+        q = q.filter(Student.section == session.section)
+    candidates = q.all()
+    students = []
+    for stu in candidates:
+        ub = (stu.branch or getattr(stu, "department", "") or "").strip().lower()
+        if not ub:
+            continue
+        if ub == sb or sb_core in ub or ub in sb or sb in ub:
+            students.append(stu)
 
     sent_count = 0
     for stu in students:

@@ -200,6 +200,22 @@ def assign_substitute(
     slot = db.query(TimetableSlot).filter(TimetableSlot.id == payload.timetable_slot_id).first()
     if not slot:
         raise HTTPException(status_code=404, detail="Timetable slot not found.")
+    # BUG FIX: this never checked that the slot actually belongs to the
+    # faculty member whose leave this is — a stray or malicious
+    # timetable_slot_id would silently create a bogus substitute record
+    # for a completely unrelated class.
+    if slot.faculty_id != req.faculty_id:
+        raise HTTPException(status_code=400, detail="That timetable slot doesn't belong to the faculty member on leave.")
+    # BUG FIX: also never checked the date is actually within the
+    # approved leave range, or that it falls on the day of week the slot
+    # actually runs on — either gap lets a typo'd date create a
+    # substitute assignment for a class that was never actually affected.
+    class_date_only = payload.class_date.date()
+    if not (req.from_date.date() <= class_date_only <= req.to_date.date()):
+        raise HTTPException(status_code=400, detail="class_date is outside this leave request's date range.")
+    slot_day = slot.day_of_week.value if hasattr(slot.day_of_week, "value") else str(slot.day_of_week)
+    if DAY_ORDER[class_date_only.weekday()] != slot_day.lower():
+        raise HTTPException(status_code=400, detail=f"That slot runs on {slot_day}, not {DAY_ORDER[class_date_only.weekday()]}.")
     substitute = db.query(Faculty).filter(Faculty.inst_id == payload.substitute_faculty_id).first()
     if not substitute:
         raise HTTPException(status_code=404, detail="Substitute faculty not found.")

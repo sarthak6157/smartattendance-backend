@@ -374,13 +374,35 @@ def check_conflicts(
     _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db),
 ):
-    """Check for conflicts: same teacher OR same room double-booked at the same time."""
-    q = db.query(TimetableSlot).filter(TimetableSlot.is_active == True)
-    if branch:   q = q.filter(func.lower(TimetableSlot.branch)   == branch.strip().lower())
-    if section:  q = q.filter(func.lower(TimetableSlot.section)  == section.strip().lower())
-    if semester: q = q.filter(func.lower(TimetableSlot.semester) == semester.strip().lower())
-    slots = q.all()
+    """Check for conflicts: same teacher OR same room double-booked at the same time.
 
+    BUG FIX (found on audit): this used to query only the slots matching
+    the branch/section/semester filter, then look for conflicts WITHIN
+    that filtered set — so a room double-booked between, say, a CSE
+    section and an ECE section would be completely invisible whenever
+    anyone checked conflicts scoped to just one branch (which is the
+    normal way the frontend calls this). Teacher conflicts had the exact
+    same gap: a faculty member double-booked across two different
+    branches wouldn't show up either. Since a room or a teacher is a
+    university-wide resource, not a per-branch one, this now always
+    builds the conflict map from EVERY active slot, and only uses the
+    branch/section/semester filter to narrow which conflicts are
+    reported (so the caller still gets a manageable list when editing
+    one branch's timetable, without silently hiding the cross-branch
+    conflicts that are usually the real problem)."""
+    all_slots = db.query(TimetableSlot).filter(TimetableSlot.is_active == True).all()
+
+    # Simple Python-side filter (cheap: a semester's worth of slots is
+    # never large enough to need this pushed into SQL) rather than
+    # re-querying — narrows which conflicts get REPORTED, without
+    # narrowing which slots get COMPARED against each other (see note above).
+    def in_scope(s):
+        if branch   and (s.branch   or "").strip().lower()   != branch.strip().lower():   return False
+        if section  and (s.section  or "").strip().lower()   != section.strip().lower():  return False
+        if semester and (s.semester or "").strip().lower()   != semester.strip().lower(): return False
+        return True
+
+    slots = all_slots  # full set — used to BUILD the conflict map
     faculty_ids = list({s.faculty_id for s in slots if s.faculty_id})
     faculty_map = {f.inst_id: f for f in db.query(Faculty).filter(Faculty.inst_id.in_(faculty_ids)).all()} if faculty_ids else {}
     course_ids  = list({s.course_id  for s in slots})
@@ -412,8 +434,9 @@ def check_conflicts(
             room_schedule[(room.lower(), day, s.start_time)].append(s)
 
     conflicts = []
+    any_filter = bool(branch or section or semester)
     for (fac_id, day, time), slot_list in teacher_schedule.items():
-        if len(slot_list) > 1:
+        if len(slot_list) > 1 and (not any_filter or any(in_scope(s) for s in slot_list)):
             fac = faculty_map.get(fac_id)
             conflicts.append({
                 "type":       "teacher",
@@ -424,7 +447,7 @@ def check_conflicts(
                 "subjects":   [courses_map.get(s.course_id, type('x', (), {'name':'?'})()).name for s in slot_list],
             })
     for (room, day, time), slot_list in room_schedule.items():
-        if len(slot_list) > 1:
+        if len(slot_list) > 1 and (not any_filter or any(in_scope(s) for s in slot_list)):
             # Two sections sharing a room is only a real conflict if
             # they're not literally the same section/course slot
             # duplicated (e.g. a combined lecture) — check faculty differs
