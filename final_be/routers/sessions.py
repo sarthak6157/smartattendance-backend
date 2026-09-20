@@ -273,6 +273,18 @@ def create_extra_class(
         qr_token      = secrets.token_urlsafe(16),
     )
     db.add(s); db.commit(); db.refresh(s)
+
+    # NEW FEATURE: same auto-notify as timetable.py's go_live() — an
+    # ad-hoc extra class is just as "live now, mark attendance" as a
+    # scheduled one, so it gets the same treatment.
+    settings = db.query(SystemSettings).filter(SystemSettings.id == 1).first()
+    if not settings or settings.auto_notify_on_go_live is not False:  # None == default-on
+        try:
+            from routers.notifications import notify_students_session_live
+            notify_students_session_live(db, s)
+        except Exception:
+            pass
+
     return s
 
 

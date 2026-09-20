@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session as DBSession
 from core.security import get_current_user, require_roles
 from db.database import get_db
 from models.models import (TimetableSlot, Session, SessionStatus,
-                           Faculty, Student, Admin, UserRole, Course, DayOfWeek)
+                           Faculty, Student, Admin, UserRole, Course, DayOfWeek, SystemSettings)
 
 router    = APIRouter()
 AdminOnly = require_roles(UserRole.admin)
@@ -374,7 +374,7 @@ def check_conflicts(
     _ = Depends(AdminOnly),
     db: DBSession = Depends(get_db),
 ):
-    """Check for teacher conflicts — same teacher at same time in different places."""
+    """Check for conflicts: same teacher OR same room double-booked at the same time."""
     q = db.query(TimetableSlot).filter(TimetableSlot.is_active == True)
     if branch:   q = q.filter(func.lower(TimetableSlot.branch)   == branch.strip().lower())
     if section:  q = q.filter(func.lower(TimetableSlot.section)  == section.strip().lower())
@@ -393,25 +393,54 @@ def check_conflicts(
     # grouping them under the same "None" key would falsely report that
     # as a conflict for a nonexistent teacher.
     from collections import defaultdict
-    schedule = defaultdict(list)
+    teacher_schedule = defaultdict(list)
+    # NEW FEATURE: room/venue conflicts — same code path, grouped by room
+    # instead of faculty. Two different sections both scheduled in the
+    # same physical room at the same time is just as real a scheduling
+    # problem as the same teacher being double-booked, and the previous
+    # version never caught it at all. Blank/unset rooms are skipped for
+    # the same reason unassigned faculty are — many free periods
+    # legitimately have no room recorded, and grouping those under one
+    # "" key would flood this with false positives.
+    room_schedule = defaultdict(list)
     for s in slots:
-        if not s.faculty_id:
-            continue
         day = s.day_of_week.value if hasattr(s.day_of_week, "value") else str(s.day_of_week)
-        key = (s.faculty_id, day, s.start_time)
-        schedule[key].append(s)
+        if s.faculty_id:
+            teacher_schedule[(s.faculty_id, day, s.start_time)].append(s)
+        room = (s.room or "").strip()
+        if room:
+            room_schedule[(room.lower(), day, s.start_time)].append(s)
 
     conflicts = []
-    for (fac_id, day, time), slot_list in schedule.items():
+    for (fac_id, day, time), slot_list in teacher_schedule.items():
         if len(slot_list) > 1:
             fac = faculty_map.get(fac_id)
             conflicts.append({
+                "type":       "teacher",
                 "teacher":    fac.full_name if fac else f"Faculty {fac_id}",
                 "day":        day,
                 "time":       time,
                 "sections":   [f"Sec {s.section}" for s in slot_list],
                 "subjects":   [courses_map.get(s.course_id, type('x', (), {'name':'?'})()).name for s in slot_list],
             })
+    for (room, day, time), slot_list in room_schedule.items():
+        if len(slot_list) > 1:
+            # Two sections sharing a room is only a real conflict if
+            # they're not literally the same section/course slot
+            # duplicated (e.g. a combined lecture) — check faculty differs
+            # OR section differs to avoid flagging a single legitimate
+            # shared class as a "conflict".
+            distinct = {(s.section, s.course_id) for s in slot_list}
+            if len(distinct) > 1:
+                conflicts.append({
+                    "type":       "room",
+                    "room":       slot_list[0].room,
+                    "day":        day,
+                    "time":       time,
+                    "sections":   [f"Sec {s.section}" for s in slot_list],
+                    "subjects":   [courses_map.get(s.course_id, type('x', (), {'name':'?'})()).name for s in slot_list],
+                    "teachers":   [(faculty_map.get(s.faculty_id).full_name if s.faculty_id and faculty_map.get(s.faculty_id) else "Unassigned") for s in slot_list],
+                })
 
     return {"conflicts": conflicts, "total": len(conflicts)}
 
@@ -711,6 +740,20 @@ def go_live(
         grace_minutes= 15,
     )
     db.add(session); db.commit(); db.refresh(session)
+
+    # NEW FEATURE: auto-notify students the instant class goes live —
+    # previously notify_session_live() existed as an endpoint but nothing
+    # ever called it, so it only fired if a faculty member remembered to
+    # trigger it by hand. Respects the global admin toggle; never lets a
+    # notification failure block the session actually going live.
+    settings = db.query(SystemSettings).filter(SystemSettings.id == 1).first()
+    if not settings or settings.auto_notify_on_go_live is not False:  # None == default-on
+        try:
+            from routers.notifications import notify_students_session_live
+            notify_students_session_live(db, session)
+        except Exception:
+            pass  # best-effort — a push-notification hiccup must never break go-live
+
     return {
         "session_id": session.id,
         "qr_token":   session.qr_token,

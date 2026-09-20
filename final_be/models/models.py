@@ -256,6 +256,9 @@ class SystemSettings(Base):
     qr_expiry     = Column(Integer, default=45)
     inst_name     = Column(String(200), default="Teerthanker Mahaveer University")
     manual_edit_window = Column(Integer, default=10)  # minutes after session end
+    # NEW (needs Alembic migration — existing table): global toggle for
+    # auto-notifying a section's students the instant a class goes live.
+    auto_notify_on_go_live = Column(Boolean, default=True)
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -334,19 +337,67 @@ class LoginAttempt(Base):
 
 
 class LeaveRequest(Base):
-    """Student-submitted leave / on-duty (OD) request. An approved request
+    """Leave request — student or faculty. An approved STUDENT request
     excludes the covered dates from that student's attendance-percentage
-    denominator — see compute_attendance_percent() in routers/attendance.py."""
+    denominator (see attendance.py's _excused_dates_by_student). An
+    approved FACULTY request is what admin uses to see which of that
+    faculty's timetable slots need a substitute — see
+    SubstituteAssignment below and routers/leave.py's affected-classes
+    endpoint.
+    SCHEMA CHANGE: student_id went from NOT NULL to nullable, and
+    faculty_id was added, to support both requester types with one real
+    foreign key each (rather than one column loosely holding either kind
+    of id with no FK integrity). This needs a real ALTER on the existing
+    table — see the new Alembic migration, not just create_all()."""
     __tablename__  = "leave_requests"
     __table_args__ = {"schema": DB_SCHEMA}
     id            = Column(Integer, primary_key=True, index=True)
-    student_id    = Column(String(50), ForeignKey(_fk("students.inst_id")), nullable=False, index=True)
+    student_id    = Column(String(50), ForeignKey(_fk("students.inst_id")), nullable=True, index=True)
+    faculty_id    = Column(String(50), ForeignKey(_fk("faculty.inst_id")), nullable=True, index=True)
     from_date     = Column(DateTime, nullable=False)
     to_date       = Column(DateTime, nullable=False)
-    leave_type    = Column(String(20), default="leave")  # leave | od
+    leave_type    = Column(String(20), default="leave")  # "leave" only — OD removed
     reason        = Column(String(500), nullable=False)
     status        = Column(String(20), default="pending", index=True)  # pending | approved | rejected
     reviewed_by   = Column(String(50), nullable=True)
     review_note   = Column(String(300), nullable=True)
     created_at    = Column(DateTime, default=datetime.utcnow)
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SubstituteAssignment(Base):
+    """Records that `substitute_faculty_id` is covering one of
+    `original_faculty_id`'s recurring timetable slots on one specific
+    calendar date, because of an approved LeaveRequest. Purely a
+    bookkeeping/visibility record — it does NOT auto-create a Session.
+    The substitute still starts the class themselves via the existing
+    "Extra Class" flow (same QR/GPS/face machinery, nothing new to
+    learn); this table is what lets their dashboard remind them "you're
+    covering X's DBMS class today at 10am" with the details pre-filled,
+    and lets admin see who's covering what."""
+    __tablename__  = "substitute_assignments"
+    __table_args__ = {"schema": DB_SCHEMA}
+    id                     = Column(Integer, primary_key=True, index=True)
+    leave_request_id       = Column(Integer, ForeignKey(_fk("leave_requests.id"), ondelete="CASCADE"), nullable=False, index=True)
+    timetable_slot_id      = Column(Integer, nullable=False)
+    class_date             = Column(DateTime, nullable=False, index=True)
+    original_faculty_id    = Column(String(50), nullable=False, index=True)
+    substitute_faculty_id  = Column(String(50), nullable=False, index=True)
+    course_id              = Column(String(20), nullable=True)
+    session_id             = Column(Integer, nullable=True)  # filled in once the substitute actually starts the class
+    created_at             = Column(DateTime, default=datetime.utcnow)
+
+
+class PushSubscriptionRecord(Base):
+    """BUG FIX: push subscriptions used to live in a plain in-memory dict
+    in routers/notifications.py — every subscription was silently wiped
+    on every server restart/redeploy, which would have quietly broken
+    the auto-notify-on-go-live feature (below) for everyone after the
+    very first redeploy. Persistent table, one row per browser/device."""
+    __tablename__  = "push_subscriptions"
+    __table_args__ = {"schema": DB_SCHEMA}
+    id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(String(50), nullable=False, index=True)
+    endpoint      = Column(String(500), nullable=False, unique=True)
+    keys_json     = Column(Text, nullable=False)  # {"p256dh": "...", "auth": "..."} as JSON text
+    created_at    = Column(DateTime, default=datetime.utcnow)

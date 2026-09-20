@@ -169,6 +169,7 @@ class SettingsOut(BaseModel):
     face_required: bool
     qr_expiry: int
     inst_name: str
+    auto_notify_on_go_live: bool = True
     model_config = {"from_attributes": True, "use_enum_values": True}
 
 class SettingsUpdate(BaseModel):
@@ -176,6 +177,7 @@ class SettingsUpdate(BaseModel):
     face_required: Optional[bool] = None
     qr_expiry:     Optional[int]  = None
     inst_name:     Optional[str]  = None
+    auto_notify_on_go_live: Optional[bool] = None
 
 TokenResponse.model_rebuild()
 
@@ -224,7 +226,8 @@ class LeaveReview(BaseModel):
 
 class LeaveOut(BaseModel):
     id: int
-    student_id: str
+    student_id: Optional[str] = None
+    faculty_id: Optional[str] = None
     from_date: datetime
     to_date: datetime
     leave_type: str
@@ -238,5 +241,21 @@ class LeaveOut(BaseModel):
 class LeaveListOut(BaseModel):
     total: int
     requests: List[LeaveOut]
+
+class AssignSubstituteRequest(BaseModel):
+    timetable_slot_id: int
+    class_date: datetime
+    substitute_faculty_id: str
+
+class SubstituteAssignmentOut(BaseModel):
+    id: int
+    leave_request_id: int
+    timetable_slot_id: int
+    class_date: datetime
+    original_faculty_id: str
+    substitute_faculty_id: str
+    course_id: Optional[str] = None
+    created_at: datetime
+    model_config = {"from_attributes": True}
 
 # Timetable schemas already handled inside timetable.py router directly

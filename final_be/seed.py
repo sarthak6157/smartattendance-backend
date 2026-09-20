@@ -25,6 +25,7 @@ def main():
                 face_required=True,
                 qr_expiry=45,
                 manual_edit_window=10,
+                auto_notify_on_go_live=True,
                 inst_name="Teerthanker Mahaveer University"
             ))
             db.commit()

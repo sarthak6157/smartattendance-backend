@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from core.security import get_current_user, require_roles
 from db.database import get_db
-from models.models import Student, UserRole, Session, SessionStatus
+from models.models import PushSubscriptionRecord, Student, UserRole, Session, SessionStatus, SystemSettings
 
 router = APIRouter()
 
@@ -17,39 +17,46 @@ class PushSubscription(BaseModel):
     endpoint:   str
     keys:       dict   # {p256dh, auth}
 
-class PushSubscriptionRecord(BaseModel):
+class PushSubscriptionRecordIn(BaseModel):
     user_id:      str
     subscription: dict
 
-# In-memory store for push subscriptions (replace with DB table in production)
-_push_subscriptions: dict[str, list[dict]] = {}
-
 # ── Push subscription endpoints ───────────────────────────────────────────────
+# BUG FIX: these used to store subscriptions in a plain in-memory dict
+# (_push_subscriptions), wiped on every server restart/redeploy. Now a
+# real table (PushSubscriptionRecord, additive-only — no migration risk).
 @router.post("/push/subscribe", status_code=201)
 def subscribe_push(
     payload: PushSubscription,
     current_user = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
 ):
     """Save a push subscription for the current user."""
-    uid = current_user.inst_id
-    if uid not in _push_subscriptions:
-        _push_subscriptions[uid] = []
-    sub_dict = {"endpoint": payload.endpoint, "keys": payload.keys}
-    # Avoid duplicate subscriptions
-    if sub_dict not in _push_subscriptions[uid]:
-        _push_subscriptions[uid].append(sub_dict)
+    existing = db.query(PushSubscriptionRecord).filter(
+        PushSubscriptionRecord.endpoint == payload.endpoint
+    ).first()
+    if existing:
+        existing.user_id = current_user.inst_id
+        existing.keys_json = json.dumps(payload.keys)
+    else:
+        db.add(PushSubscriptionRecord(
+            user_id=current_user.inst_id, endpoint=payload.endpoint,
+            keys_json=json.dumps(payload.keys),
+        ))
+    db.commit()
     return {"message": "Subscribed to push notifications!"}
 
 @router.delete("/push/unsubscribe")
-def unsubscribe_push(current_user = Depends(get_current_user)):
+def unsubscribe_push(current_user = Depends(get_current_user), db: DBSession = Depends(get_db)):
     """Remove all push subscriptions for current user."""
-    _push_subscriptions.pop(current_user.inst_id, None)
+    db.query(PushSubscriptionRecord).filter(PushSubscriptionRecord.user_id == current_user.inst_id).delete()
+    db.commit()
     return {"message": "Unsubscribed from push notifications."}
 
 # ── Send push notification to a user ─────────────────────────────────────────
-def send_push_to_user(user_id: str, title: str, body: str, url: str = "/"):
+def send_push_to_user(db: DBSession, user_id: str, title: str, body: str, url: str = "/"):
     """Send a web push notification to all devices of a user."""
-    subs = _push_subscriptions.get(user_id, [])
+    subs = db.query(PushSubscriptionRecord).filter(PushSubscriptionRecord.user_id == user_id).all()
     if not subs:
         return 0
 
@@ -66,40 +73,32 @@ def send_push_to_user(user_id: str, title: str, body: str, url: str = "/"):
 
     payload = json.dumps({"title": title, "body": body, "url": url})
     sent = 0
-    failed = []
+    dead_ids = []
     for sub in subs:
         try:
             webpush(
-                subscription_info=sub,
+                subscription_info={"endpoint": sub.endpoint, "keys": json.loads(sub.keys_json)},
                 data=payload,
                 vapid_private_key=VAPID_PRIVATE,
                 vapid_claims={"sub": f"mailto:{VAPID_EMAIL}"},
             )
             sent += 1
         except Exception:
-            failed.append(sub)
+            dead_ids.append(sub.id)  # expired/invalid subscription — browser unsubscribed it on its end
 
-    # Remove failed subscriptions
-    if failed:
-        _push_subscriptions[user_id] = [s for s in subs if s not in failed]
+    if dead_ids:
+        db.query(PushSubscriptionRecord).filter(PushSubscriptionRecord.id.in_(dead_ids)).delete(synchronize_session=False)
+        db.commit()
     return sent
 
 
 # ── Notify section when session goes live ─────────────────────────────────────
-@router.post("/notify/session-live/{session_id}")
-def notify_session_live(
-    session_id: int,
-    current_user = Depends(require_roles(UserRole.faculty, UserRole.admin)),
-    db: DBSession = Depends(get_db),
-):
-    """Notify all students in a section that a session has gone live."""
-    session = db.query(Session).filter(Session.id == session_id).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found.")
-    if session.status != SessionStatus.active:
-        raise HTTPException(status_code=400, detail="Session is not active.")
-
-    # Get students in this section
+def notify_students_session_live(db: DBSession, session: Session) -> dict:
+    """NEW: the actual notification logic, extracted so it can be called
+    automatically from go_live()/create_extra_class() as well as from the
+    manual endpoint below. Previously this only existed as something a
+    faculty member had to remember to trigger by hand — dead code from
+    the students' point of view unless someone clicked an extra button."""
     q = db.query(Student).filter(Student.status == "active")
     if session.branch:  q = q.filter(Student.branch  == session.branch)
     if session.section: q = q.filter(Student.section == session.section)
@@ -107,18 +106,35 @@ def notify_session_live(
 
     sent_count = 0
     for stu in students:
-        sent = send_push_to_user(
-            user_id=stu.inst_id,
+        sent_count += send_push_to_user(
+            db, user_id=stu.inst_id,
             title="Class Started!",
-            body=f"{session.title} is now live. Mark your attendance now!",
+            body=f"{session.title or 'Your class'} is now live. Mark your attendance now!",
             url="/",
         )
-        sent_count += sent
+    return {"students_count": len(students), "pushes_sent": sent_count}
 
+
+@router.post("/notify/session-live/{session_id}")
+def notify_session_live(
+    session_id: int,
+    current_user = Depends(require_roles(UserRole.faculty, UserRole.admin)),
+    db: DBSession = Depends(get_db),
+):
+    """Manual trigger — kept for faculty who want to re-notify or notify
+    a session the auto-notify toggle skipped. See notify_students_session_live()
+    for the actual logic, and timetable.py's go_live() / sessions.py's
+    create_extra_class() for the automatic call."""
+    session = db.query(Session).filter(Session.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if session.status != SessionStatus.active:
+        raise HTTPException(status_code=400, detail="Session is not active.")
+
+    result = notify_students_session_live(db, session)
     return {
-        "message":         f"Notified {len(students)} students, {sent_count} push notifications sent.",
-        "students_count":  len(students),
-        "pushes_sent":     sent_count,
+        "message": f"Notified {result['students_count']} students, {result['pushes_sent']} push notifications sent.",
+        **result,
     }
 
 
